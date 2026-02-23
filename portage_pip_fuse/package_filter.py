@@ -110,11 +110,19 @@ class FilterDependencyTree(FilterBase):
         # Load cached dependency tree if available
         self._load_cached_tree()
         
-    def get_packages(self) -> Set[str]:
-        """Resolve and return all packages in the dependency tree."""
+    def initialize(self):
+        """Pre-resolve dependency tree during initialization."""
         if self._resolved_packages is None:
+            logger.info(f"Resolving dependency tree for {', '.join(self.root_packages)}...")
             self._resolved_packages = self._resolve_all_dependencies()
             self._save_cached_tree()
+            logger.info(f"Dependency tree resolved: {len(self._resolved_packages)} packages")
+    
+    def get_packages(self) -> Set[str]:
+        """Return the pre-resolved packages in the dependency tree."""
+        if self._resolved_packages is None:
+            # Fallback: resolve if not initialized (shouldn't happen normally)
+            self.initialize()
         return self._resolved_packages
     
     def _get_cache_key(self) -> str:
@@ -206,7 +214,9 @@ class FilterDependencyTree(FilterBase):
         
         for package in self.root_packages:
             logger.info(f"Resolving dependencies for {package}")
-            deps = self._resolve_package_dependencies(package, depth=0, include_all_extras=True)
+            # Note: include_all_extras=False to avoid massive dependency trees
+            # Users can specify extras via use_flags if needed
+            deps = self._resolve_package_dependencies(package, depth=0, include_all_extras=False)
             all_packages.update(deps)
             logger.info(f"Package {package} has {len(deps)} total dependencies")
             
@@ -571,6 +581,12 @@ class FilterChain(FilterBase):
         
         if self.operator not in ('AND', 'OR'):
             raise ValueError(f"Invalid operator: {operator}")
+    
+    def initialize(self):
+        """Initialize all filters in the chain."""
+        for filter_obj in self.filters:
+            if hasattr(filter_obj, 'initialize'):
+                filter_obj.initialize()
             
     def get_packages(self) -> Set[str]:
         """Combine filters and return package set."""

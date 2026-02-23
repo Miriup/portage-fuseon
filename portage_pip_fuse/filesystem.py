@@ -108,6 +108,12 @@ class PortagePipFS(Operations):
         # Set up package filter based on configuration
         self.package_filter = self._create_filter(filter_config or {})
         
+        # Pre-resolve dependency trees during initialization
+        # This avoids slow first directory listings
+        if hasattr(self.package_filter, 'initialize'):
+            logger.info("Pre-resolving package filter...")
+            self.package_filter.initialize()
+        
         # Timestamp lookup setting
         self.no_timestamps = (filter_config or {}).get('no_timestamps', False)
         
