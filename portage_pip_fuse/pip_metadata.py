@@ -233,7 +233,7 @@ class PyPIMetadataExtractor:
     def get_package_json(self, package_name: str, 
                         version: Optional[str] = None) -> Optional[Dict]:
         """
-        Get package metadata from PyPI JSON API.
+        Get package metadata from PyPI JSON API with caching.
         
         Args:
             package_name: The PyPI package name
@@ -254,6 +254,34 @@ class PyPIMetadataExtractor:
         if not HAS_REQUESTS:
             logger.warning("requests library not available")
             return None
+        
+        # Create cache key
+        cache_key = f"{package_name}_{version}" if version else package_name
+        
+        # Check memory cache first
+        if cache_key in self._memory_cache:
+            data, timestamp = self._memory_cache[cache_key]
+            if time.time() - timestamp < self.cache_ttl:
+                logger.debug(f"Using memory cached data for {cache_key}")
+                return data
+            else:
+                del self._memory_cache[cache_key]
+        
+        # Check disk cache
+        cache_file = self.cache_dir / f"{cache_key.replace('/', '_')}.json"
+        if cache_file.exists():
+            try:
+                mtime = cache_file.stat().st_mtime
+                if time.time() - mtime < self.cache_ttl:
+                    with open(cache_file, 'r') as f:
+                        data = json.load(f)
+                    logger.debug(f"Using disk cached data for {cache_key}")
+                    # Also cache in memory
+                    self._memory_cache[cache_key] = (data, time.time())
+                    return data
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"Failed to read cache file {cache_file}: {e}")
+                # Continue to fetch from PyPI
             
         try:
             if version:
@@ -264,9 +292,24 @@ class PyPIMetadataExtractor:
             response = requests.get(url, timeout=self.session_timeout)
             
             if response.status_code == 200:
-                return response.json()
+                data = response.json()
+                
+                # Cache the result
+                self._memory_cache[cache_key] = (data, time.time())
+                
+                # Save to disk cache
+                try:
+                    with open(cache_file, 'w') as f:
+                        json.dump(data, f)
+                    logger.debug(f"Cached {cache_key} to disk")
+                except IOError as e:
+                    logger.warning(f"Failed to write cache file {cache_file}: {e}")
+                
+                return data
             elif response.status_code == 404:
                 logger.info(f"Package {package_name} not found on PyPI")
+                # Cache the negative result to avoid repeated lookups
+                self._memory_cache[cache_key] = (None, time.time())
                 return None
             else:
                 logger.warning(f"PyPI API returned status {response.status_code} for {package_name}")

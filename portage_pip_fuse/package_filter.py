@@ -103,6 +103,10 @@ class FilterDependencyTree(FilterBase):
         self._resolved_packages: Optional[Set[str]] = None
         self._resolution_cache: Dict[str, dict] = {}
         
+        # Initialize PyPIMetadataExtractor for cached API access
+        from .pip_metadata import PyPIMetadataExtractor
+        self.pypi_extractor = PyPIMetadataExtractor(cache_dir=cache_dir)
+        
     def get_packages(self) -> Set[str]:
         """Resolve and return all packages in the dependency tree."""
         if self._resolved_packages is None:
@@ -207,7 +211,7 @@ class FilterDependencyTree(FilterBase):
         """
         Fetch package metadata from PyPI.
         
-        Uses caching to avoid repeated API calls.
+        Uses PyPIMetadataExtractor with persistent disk caching to avoid repeated API calls.
         
         Args:
             package_name: PyPI package name
@@ -215,19 +219,16 @@ class FilterDependencyTree(FilterBase):
         Returns:
             Package metadata dict or None if not found
         """
-        # Check memory cache first
+        # Check memory cache first for even faster access
         if package_name in self._resolution_cache:
             return self._resolution_cache[package_name]
             
         try:
-            # Fetch from PyPI
-            response = requests.get(
-                f'https://pypi.org/pypi/{package_name}/json',
-                timeout=10
-            )
+            # Use PyPIMetadataExtractor which has disk-based caching
+            metadata = self.pypi_extractor.get_package_json(package_name)
             
-            if response.status_code == 200:
-                metadata = response.json()
+            if metadata:
+                # Cache in memory for this session
                 self._resolution_cache[package_name] = metadata
                 return metadata
             else:
