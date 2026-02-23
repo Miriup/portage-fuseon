@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portage-pip-fuse"
+version = "0.1.0"
+description = "A FUSE-based filesystem adapter that bridges pip and portage package managers"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "GPL-2.0"}
+authors = [
+    {name = "Dirk Tilger", email = "dirk@systemication.com"},
+]
+maintainers = [
+    {name = "Dirk Tilger", email = "dirk@systemication.com"},
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Filesystems",
+    "Topic :: System :: Software Distribution",
+    "Topic :: System :: Systems Administration :: Package Management",
+]
+keywords = ["portage", "pip", "fuse", "filesystem", "package-management", "gentoo"]
+dependencies = [
+    "fusepy>=3.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=3.0",
+    "black>=22.0",
+    "isort>=5.0",
+    "mypy>=0.950",
+    "flake8>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Miriup/portage-pip-fuse"
+Repository = "https://github.com/Miriup/portage-pip-fuse"
+Issues = "https://github.com/Miriup/portage-pip-fuse/issues"
+Documentation = "https://github.com/Miriup/portage-pip-fuse/docs"
+
+[project.scripts]
+portage-pip-fuse = "portage_pip_fuse.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["portage_pip_fuse*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

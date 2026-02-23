@@ -1,0 +1,18 @@
+"""
+portage-pip-fuse: A FUSE-based filesystem adapter between pip and portage.
+
+This package provides a virtual filesystem that translates between Python's pip
+package format and Gentoo's portage ebuild format, enabling seamless integration
+between the two package management systems.
+
+Copyright (C) 2026 Dirk Tilger
+Licensed under GPL-2.0
+"""
+
+__version__ = "0.1.0"
+__author__ = "Dirk Tilger"
+__email__ = "dirk@systemication.com"
+
+from portage_pip_fuse.filesystem import PortagePipFS
+
+__all__ = ["PortagePipFS", "__version__"]
