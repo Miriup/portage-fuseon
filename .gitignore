@@ -144,3 +144,32 @@ cython_debug/
 
 # macOS
 .DS_Store
+
+# Vim
+*.swp
+*.swo
+*.swn
+*.vim
+.*.swp
+.*.swo
+.*.swn
+*~
+Session.vim
+.netrwhist
+
+# Emacs
+*~
+\#*\#
+.\#*
+*.elc
+auto-save-list
+.dir-locals.el
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Other editors
+*.bak
+*.tmp
+.*.tmp

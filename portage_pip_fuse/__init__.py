@@ -14,5 +14,18 @@ __author__ = "Dirk Tilger"
 __email__ = "dirk@systemication.com"
 
 from portage_pip_fuse.filesystem import PortagePipFS
+from portage_pip_fuse.name_translator import (
+    SimpleNameTranslator,
+    CachedNameTranslator,
+    pypi_to_gentoo,
+    gentoo_to_pypi,
+)
 
-__all__ = ["PortagePipFS", "__version__"]
+__all__ = [
+    "PortagePipFS",
+    "SimpleNameTranslator",
+    "CachedNameTranslator",
+    "pypi_to_gentoo",
+    "gentoo_to_pypi",
+    "__version__",
+]
