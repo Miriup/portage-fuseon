@@ -862,9 +862,25 @@ class EbuildDataExtractor:
             elif operator == '!=':
                 dep_parts.append(f"!dev-python/{gentoo_name}-{version}")
             elif operator == '~=':
-                # Compatible release: ~=1.4 means >=1.4, <1.5
-                # In Gentoo, this is often handled with a range or just >=
-                dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+                # Compatible release per PEP 440: ~=1.4 means >=1.4, ==1.*
+                # ~=1.4.5 means >=1.4.5, ==1.4.*
+                # We need to create the upper bound by incrementing the last segment
+                version_parts = version.split('.')
+                if len(version_parts) >= 2:
+                    # Create upper bound by incrementing the second-to-last segment
+                    upper_parts = version_parts[:-1]  # Remove last segment
+                    try:
+                        # Increment the last remaining segment
+                        upper_parts[-1] = str(int(upper_parts[-1]) + 1)
+                        upper_version = '.'.join(upper_parts)
+                        dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+                        dep_parts.append(f"<dev-python/{gentoo_name}-{upper_version}")
+                    except ValueError:
+                        # If conversion fails, fall back to just >=
+                        dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+                else:
+                    # Single segment - not valid per PEP 440, but handle gracefully
+                    dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
         
         # For multiple specifiers, we need to use Gentoo's syntax
         if len(dep_parts) == 1:
