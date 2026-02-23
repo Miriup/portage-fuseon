@@ -250,10 +250,17 @@ cache-formats = md5-dict
     def _gentoo_to_pypi(self, gentoo_name: str) -> Optional[str]:
         """Convert Gentoo package name to PyPI name."""
         try:
-            return self.name_translator.gentoo_to_pypi(gentoo_name)
+            # First try the translator for known Gentoo packages
+            pypi_name = self.name_translator.gentoo_to_pypi(gentoo_name)
+            if pypi_name:
+                return pypi_name
         except Exception as e:
-            logger.warning(f"Name translation failed for {gentoo_name}: {e}")
-            return None
+            logger.debug(f"Name translation failed for {gentoo_name}: {e}")
+        
+        # For packages not in Gentoo repos, the name might already be a PyPI name
+        # (we use PyPI names directly when translator doesn't know them)
+        # Just return it as-is - PyPI will validate if it exists
+        return gentoo_name
             
     def _get_package_metadata(self, pypi_name: str) -> Optional[dict]:
         """Get complete package metadata from PyPI."""
@@ -605,11 +612,16 @@ cache-formats = md5-dict
                 pypi_packages = self.package_filter.get_packages()
                 
                 # Convert PyPI names to Gentoo names
+                # For packages without existing Gentoo names, use the PyPI name directly
                 gentoo_packages = []
                 for pypi_name in pypi_packages:
                     gentoo_name = self.name_translator.pypi_to_gentoo(pypi_name)
                     if gentoo_name:
                         gentoo_packages.append(gentoo_name)
+                    else:
+                        # Use PyPI name directly (it will be translated back when accessed)
+                        # This allows us to provide PyPI packages that don't exist in Gentoo yet
+                        gentoo_packages.append(pypi_name.lower().replace('_', '-').replace('.', '-'))
                 
                 entries.extend(sorted(gentoo_packages))
                 
