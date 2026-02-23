@@ -538,7 +538,9 @@ cache-formats = md5-dict
             # This ensures vim and other tools see the correct file size
             try:
                 if parsed['type'] == 'ebuild':
-                    content = self._generate_ebuild(pypi_name, parsed['version'])
+                    # Extract category from parsed path
+                    category = parsed.get('category', 'dev-python')
+                    content = self._generate_ebuild(category, parsed['package'], parsed['version'])
                     attrs['st_size'] = len(content.encode('utf-8'))
                 elif parsed['type'] == 'package_metadata':
                     content = self._generate_metadata_xml(pypi_name)
