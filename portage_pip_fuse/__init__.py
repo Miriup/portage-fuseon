@@ -25,6 +25,12 @@ from portage_pip_fuse.prefetcher import (
     PyPIPrefetcher,
     create_prefetched_translator,
 )
+from portage_pip_fuse.pip_metadata import (
+    PyPIMetadataExtractor,
+    EbuildDataExtractor,
+    get_package_info,
+    generate_manifest_dist,
+)
 
 __all__ = [
     "PortagePipFS",
@@ -35,5 +41,9 @@ __all__ = [
     "RepositoryScanner",
     "PyPIPrefetcher",
     "create_prefetched_translator",
+    "PyPIMetadataExtractor", 
+    "EbuildDataExtractor",
+    "get_package_info",
+    "generate_manifest_dist",
     "__version__",
 ]
