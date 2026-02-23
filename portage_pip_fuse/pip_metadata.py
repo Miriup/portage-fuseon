@@ -712,12 +712,31 @@ class EbuildDataExtractor:
         formatted_deps = []
         
         for dep_str in dependencies:
-            # Extract package name (before version specifiers)
-            package_name = dep_str.split()[0].split('>=')[0].split('==')[0].split('<')[0].split('>')[0]
+            # Parse dependency using pip's requirement parsing
+            try:
+                from pip._vendor.packaging.requirements import Requirement
+                req = Requirement(dep_str.strip())
+                package_name = req.name
+                specifiers = req.specifier
+            except ImportError:
+                # Fallback to packaging library
+                try:
+                    from packaging.requirements import Requirement
+                    req = Requirement(dep_str.strip())
+                    package_name = req.name
+                    specifiers = req.specifier
+                except ImportError:
+                    # Last resort: manual parsing
+                    match = re.match(r'^([a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]|[a-zA-Z0-9])', dep_str.strip())
+                    package_name = match.group(1) if match else dep_str.split()[0]
+                    specifiers = None
             
-            # Translate to Gentoo name
+            # Translate to Gentoo name and add version specifiers
             gentoo_name = default_translator.pypi_to_gentoo(package_name)
-            gentoo_dep = f"dev-python/{gentoo_name}"
+            if specifiers:
+                gentoo_dep = self._format_gentoo_dependency(gentoo_name, specifiers)
+            else:
+                gentoo_dep = f"dev-python/{gentoo_name}"
             
             # TODO: Add version constraints parsing
             formatted_deps.append(gentoo_dep)
@@ -770,10 +789,31 @@ class EbuildDataExtractor:
             # Convert extra name to valid USE flag (lowercase, replace special chars)
             use_flag = re.sub(r'[^a-z0-9_]', '_', extra_name.lower().replace('-', '_'))
             
-            # Extract package name
-            package_name = base_req.split()[0].split('>=')[0].split('==')[0].split('<')[0].split('>')[0]
+            # Parse dependency using pip's requirement parsing
+            try:
+                from pip._vendor.packaging.requirements import Requirement
+                req = Requirement(base_req.strip())
+                package_name = req.name
+                specifiers = req.specifier
+            except ImportError:
+                # Fallback to packaging library
+                try:
+                    from packaging.requirements import Requirement
+                    req = Requirement(base_req.strip())
+                    package_name = req.name
+                    specifiers = req.specifier
+                except ImportError:
+                    # Last resort: manual parsing
+                    match = re.match(r'^([a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]|[a-zA-Z0-9])', base_req.strip())
+                    package_name = match.group(1) if match else base_req.split()[0]
+                    specifiers = None
+            
+            # Translate to Gentoo name and add version specifiers
             gentoo_name = default_translator.pypi_to_gentoo(package_name)
-            gentoo_dep = f"dev-python/{gentoo_name}"
+            if specifiers:
+                gentoo_dep = self._format_gentoo_dependency(gentoo_name, specifiers)
+            else:
+                gentoo_dep = f"dev-python/{gentoo_name}"
             
             # Add to collections
             iuse_flags.add(use_flag)
@@ -782,6 +822,56 @@ class EbuildDataExtractor:
             optional_depend[use_flag].append(gentoo_dep)
         
         return sorted(list(iuse_flags)), optional_depend
+    
+    def _format_gentoo_dependency(self, gentoo_name: str, specifiers) -> str:
+        """
+        Format a Gentoo dependency string with version specifiers.
+        
+        Args:
+            gentoo_name: The Gentoo package name
+            specifiers: Packaging specifiers from Requirement object
+            
+        Returns:
+            Formatted Gentoo dependency string
+            
+        Examples:
+            >>> extractor = EbuildDataExtractor()
+            >>> # This would be called internally, but for demonstration:
+            >>> # specifiers like '>=6.0.0' become '>=dev-python/pytest-6.0.0'
+        """
+        if not specifiers:
+            return f"dev-python/{gentoo_name}"
+        
+        # Convert PyPI version specifiers to Gentoo format
+        dep_parts = []
+        for spec in specifiers:
+            operator = spec.operator
+            version = spec.version
+            
+            # Translate operators to Gentoo format
+            if operator == '==':
+                dep_parts.append(f"=dev-python/{gentoo_name}-{version}")
+            elif operator == '>=':
+                dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+            elif operator == '>':
+                dep_parts.append(f">dev-python/{gentoo_name}-{version}")
+            elif operator == '<=':
+                dep_parts.append(f"<=dev-python/{gentoo_name}-{version}")
+            elif operator == '<':
+                dep_parts.append(f"<dev-python/{gentoo_name}-{version}")
+            elif operator == '!=':
+                dep_parts.append(f"!dev-python/{gentoo_name}-{version}")
+            elif operator == '~=':
+                # Compatible release: ~=1.4 means >=1.4, <1.5
+                # In Gentoo, this is often handled with a range or just >=
+                dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+        
+        # For multiple specifiers, we need to use Gentoo's syntax
+        if len(dep_parts) == 1:
+            return dep_parts[0]
+        else:
+            # Multiple constraints - use space separation (Gentoo handles this)
+            return ' '.join(dep_parts)
     
     def prepare_ebuild_data(self, package_info: Dict[str, Any]) -> Dict[str, Any]:
         """
