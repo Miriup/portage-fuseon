@@ -12,6 +12,7 @@ Licensed under GPL-2.0
 import hashlib
 import logging
 import os
+import re
 from typing import Dict, List, Optional, Tuple, Any
 from urllib.parse import urlparse
 
@@ -601,6 +602,65 @@ class EbuildDataExtractor:
             formatted_deps.append(gentoo_dep)
         
         return formatted_deps
+        
+    def extract_extras_as_use_flags(self, optional_dependencies: List[str]) -> Tuple[List[str], Dict[str, List[str]]]:
+        """
+        Extract PyPI extras and convert them to Gentoo USE flags.
+        
+        Args:
+            optional_dependencies: List of optional requirement strings with extras
+            
+        Returns:
+            Tuple of (IUSE flags, OPTIONAL_DEPEND dict mapping USE flag to dependencies)
+            
+        Examples:
+            >>> extractor = EbuildDataExtractor()
+            >>> optional_deps = [
+            ...     'pytest>=6.0; extra == "test"',
+            ...     'sphinx>=4.0; extra == "docs"',
+            ...     'requests-mock; extra == "test"'
+            ... ]
+            >>> iuse, optional_depend = extractor.extract_extras_as_use_flags(optional_deps)
+            >>> 'test' in iuse
+            True
+            >>> 'docs' in iuse
+            True
+            >>> 'test' in optional_depend
+            True
+            >>> len(optional_depend['test']) >= 2  # pytest and requests-mock
+            True
+        """
+        from portage_pip_fuse.name_translator import default_translator
+        
+        iuse_flags = set()
+        optional_depend = {}
+        
+        for dep_str in optional_dependencies:
+            if '; extra ==' not in dep_str:
+                continue
+                
+            # Split requirement from extra condition
+            base_req, condition = dep_str.split('; extra ==', 1)
+            base_req = base_req.strip()
+            
+            # Extract extra name, removing quotes
+            extra_name = condition.strip().strip('\"').strip("'")
+            
+            # Convert extra name to valid USE flag (lowercase, replace special chars)
+            use_flag = re.sub(r'[^a-z0-9_]', '_', extra_name.lower().replace('-', '_'))
+            
+            # Extract package name
+            package_name = base_req.split()[0].split('>=')[0].split('==')[0].split('<')[0].split('>')[0]
+            gentoo_name = default_translator.pypi_to_gentoo(package_name)
+            gentoo_dep = f"dev-python/{gentoo_name}"
+            
+            # Add to collections
+            iuse_flags.add(use_flag)
+            if use_flag not in optional_depend:
+                optional_depend[use_flag] = []
+            optional_depend[use_flag].append(gentoo_dep)
+        
+        return sorted(list(iuse_flags)), optional_depend
     
     def prepare_ebuild_data(self, package_info: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -665,8 +725,16 @@ class EbuildDataExtractor:
             # Additional metadata
             'KEYWORDS': '~amd64 ~x86',  # Default conservative keywords
             'SLOT': '0',
-            'IUSE': '',
         }
+        
+        # Handle PyPI extras as USE flags
+        optional_deps = package_info.get('optional_dependencies', [])
+        if optional_deps:
+            iuse_flags, optional_depend = self.extract_extras_as_use_flags(optional_deps)
+            ebuild_data['IUSE'] = iuse_flags
+            ebuild_data['OPTIONAL_DEPEND'] = optional_depend
+        else:
+            ebuild_data['IUSE'] = []
         
         return ebuild_data
 

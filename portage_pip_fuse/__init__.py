@@ -13,7 +13,7 @@ __version__ = "0.1.0"
 __author__ = "Dirk Tilger"
 __email__ = "dirk@systemication.com"
 
-from portage_pip_fuse.filesystem import PortagePipFS
+from portage_pip_fuse.filesystem import PortagePipFS, mount_filesystem
 from portage_pip_fuse.name_translator import (
     SimpleNameTranslator,
     CachedNameTranslator,
@@ -34,6 +34,7 @@ from portage_pip_fuse.pip_metadata import (
 
 __all__ = [
     "PortagePipFS",
+    "mount_filesystem",
     "SimpleNameTranslator",
     "CachedNameTranslator",
     "pypi_to_gentoo",
