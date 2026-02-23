@@ -96,22 +96,104 @@ class FilterDependencyTree(FilterBase):
             cache_dir: Directory for caching package metadata
             max_depth: Maximum recursion depth for dependency resolution
         """
-        self.root_packages = root_packages or []
-        self.use_flags = use_flags or []
-        self.cache_dir = cache_dir
+        self.root_packages = sorted(root_packages) if root_packages else []
+        self.use_flags = sorted(use_flags) if use_flags else []
+        self.cache_dir = Path(cache_dir) if cache_dir else Path('/tmp/portage-pip-fuse-cache')
         self.max_depth = max_depth
         self._resolved_packages: Optional[Set[str]] = None
         self._resolution_cache: Dict[str, dict] = {}
         
         # Initialize PyPIMetadataExtractor for cached API access
         from .pip_metadata import PyPIMetadataExtractor
-        self.pypi_extractor = PyPIMetadataExtractor(cache_dir=cache_dir)
+        self.pypi_extractor = PyPIMetadataExtractor(cache_dir=self.cache_dir)
+        
+        # Load cached dependency tree if available
+        self._load_cached_tree()
         
     def get_packages(self) -> Set[str]:
         """Resolve and return all packages in the dependency tree."""
         if self._resolved_packages is None:
             self._resolved_packages = self._resolve_all_dependencies()
+            self._save_cached_tree()
         return self._resolved_packages
+    
+    def _get_cache_key(self) -> str:
+        """Generate a unique cache key for this dependency configuration."""
+        import hashlib
+        # Create a deterministic key based on packages and flags
+        key_parts = [
+            "deptree",
+            "_".join(self.root_packages),
+            "_".join(self.use_flags) if self.use_flags else "no_flags"
+        ]
+        key_str = "_".join(key_parts)
+        # Hash it if too long
+        if len(key_str) > 100:
+            key_hash = hashlib.md5(key_str.encode()).hexdigest()[:12]
+            return f"deptree_{key_hash}"
+        return key_str.replace('/', '_').replace('-', '_')
+    
+    def _get_cache_file_path(self) -> Path:
+        """Get the path to the cache file for this dependency tree."""
+        return self.cache_dir / f"{self._get_cache_key()}.depset"
+    
+    def _load_cached_tree(self):
+        """Load previously resolved dependency tree from cache."""
+        cache_file = self._get_cache_file_path()
+        if not cache_file.exists():
+            return
+        
+        try:
+            import json
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
+            
+            # Verify cache is for the same configuration
+            if (cache_data.get('root_packages') == self.root_packages and
+                cache_data.get('use_flags') == self.use_flags):
+                
+                # Check cache age (24 hours by default)
+                import time
+                cache_age = time.time() - cache_data.get('timestamp', 0)
+                if cache_age < 86400:  # 24 hours
+                    self._resolved_packages = set(cache_data.get('packages', []))
+                    logger.info(f"Loaded cached dependency tree with {len(self._resolved_packages)} packages")
+                else:
+                    logger.debug(f"Cache too old ({cache_age/3600:.1f} hours), will re-resolve")
+            else:
+                logger.debug("Cache configuration mismatch, will re-resolve")
+                
+        except (json.JSONDecodeError, IOError, KeyError) as e:
+            logger.debug(f"Failed to load cached dependency tree: {e}")
+    
+    def _save_cached_tree(self):
+        """Save resolved dependency tree to cache."""
+        if self._resolved_packages is None:
+            return
+        
+        cache_file = self._get_cache_file_path()
+        try:
+            import json
+            import time
+            
+            # Ensure cache directory exists
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            
+            cache_data = {
+                'root_packages': self.root_packages,
+                'use_flags': self.use_flags,
+                'packages': sorted(self._resolved_packages),
+                'timestamp': time.time(),
+                'package_count': len(self._resolved_packages)
+            }
+            
+            with open(cache_file, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+            
+            logger.info(f"Saved dependency tree to cache: {len(self._resolved_packages)} packages")
+            
+        except (IOError, OSError) as e:
+            logger.warning(f"Failed to save dependency tree cache: {e}")
     
     def get_description(self) -> str:
         """Get description of this filter."""
@@ -124,14 +206,15 @@ class FilterDependencyTree(FilterBase):
         
         for package in self.root_packages:
             logger.info(f"Resolving dependencies for {package}")
-            deps = self._resolve_package_dependencies(package, depth=0)
+            deps = self._resolve_package_dependencies(package, depth=0, include_all_extras=True)
             all_packages.update(deps)
             logger.info(f"Package {package} has {len(deps)} total dependencies")
             
         return all_packages
     
     def _resolve_package_dependencies(self, package_name: str, depth: int = 0,
-                                     visited: Optional[Set[str]] = None) -> Set[str]:
+                                     visited: Optional[Set[str]] = None,
+                                     include_all_extras: bool = False) -> Set[str]:
         """
         Recursively resolve dependencies for a single package.
         
@@ -139,6 +222,7 @@ class FilterDependencyTree(FilterBase):
             package_name: PyPI package name to resolve
             depth: Current recursion depth
             visited: Set of already visited packages (for cycle detection)
+            include_all_extras: If True, include dependencies for ALL extras
             
         Returns:
             Set of all package names in the dependency tree
@@ -168,11 +252,23 @@ class FilterDependencyTree(FilterBase):
             try:
                 req = Requirement(req_str)
                 
-                # Check if this dependency applies based on markers and extras
-                if self._should_include_dependency(req):
-                    # Recursively resolve this dependency
+                # Normalize the dependency name for cycle detection
+                dep_name = req.name.lower().replace('_', '-').replace('.', '-')
+                
+                # Skip if already visited (prevent cycles)
+                if dep_name in visited:
+                    continue
+                
+                # When include_all_extras is True, include ALL dependencies regardless of markers
+                if include_all_extras:
+                    # Include the dependency (it might be conditional on an extra)
                     self._resolve_package_dependencies(
-                        req.name, depth + 1, visited
+                        req.name, depth + 1, visited, include_all_extras
+                    )
+                elif self._should_include_dependency(req):
+                    # Check if this dependency applies based on markers and extras
+                    self._resolve_package_dependencies(
+                        req.name, depth + 1, visited, include_all_extras
                     )
                     
             except Exception as e:
