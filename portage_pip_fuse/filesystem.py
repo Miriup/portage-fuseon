@@ -131,7 +131,7 @@ class PortagePipFS(Operations):
             self.package_filter.initialize()
         
         # Timestamp lookup setting
-        self.no_timestamps = (filter_config or {}).get('no_timestamps', False)
+        self.no_timestamps = (filter_config or {}).get('no_timestamps', True)
         
         logger.info(f"PortagePipFS initialized with filter: {self.package_filter.get_description()}")
         if self.version_filter_chain:

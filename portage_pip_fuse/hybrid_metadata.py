@@ -235,7 +235,28 @@ class HybridMetadataExtractor:
                 logger.debug(f"JSON API error getting releases for {package_name} {version}: {e}")
                 
         return []
-        
+
+    def get_complete_package_info(self, package_name: str,
+                                  version: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Get complete package information for ebuild generation.
+
+        This method delegates to the JSON backend since it has all the
+        necessary methods for extracting detailed package information.
+
+        Args:
+            package_name: PyPI package name
+            version: Specific version, or None for latest
+
+        Returns:
+            Complete package information dictionary
+        """
+        if self.json_backend:
+            return self.json_backend.get_complete_package_info(package_name, version)
+
+        logger.warning(f"No JSON backend available for complete info: {package_name}")
+        return None
+
     def _convert_sqlite_to_json_format(self, package_name: str, sqlite_metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
         Convert SQLite metadata format to PyPI JSON format.

@@ -621,13 +621,14 @@ class SQLiteMetadataBackend:
         try:
             cursor = self._conn.cursor()
             
-            # Query package information
-            # Note: Exact schema depends on pypi-data structure
+            # Query package information from projects table
+            # The pypi-data database has one row per package+version in 'projects'
             cursor.execute("""
-                SELECT name, summary, author, author_email, home_page, license, 
-                       requires_python, version, description, keywords
-                FROM packages 
-                WHERE name = ? 
+                SELECT name, summary, author, author_email, home_page, license,
+                       requires_python, version, classifiers, requires_dist
+                FROM projects
+                WHERE name = ?
+                ORDER BY id DESC
                 LIMIT 1
             """, (package_name,))
             
@@ -659,12 +660,12 @@ class SQLiteMetadataBackend:
         try:
             cursor = self._conn.cursor()
             
-            # Query versions for package
+            # Query versions from projects table (one row per package+version)
             cursor.execute("""
-                SELECT DISTINCT name as version
-                FROM versions 
-                WHERE package = ?
-                ORDER BY name DESC
+                SELECT DISTINCT version
+                FROM projects
+                WHERE name = ?
+                ORDER BY id DESC
             """, (package_name,))
             
             return [row[0] for row in cursor.fetchall()]
@@ -691,21 +692,25 @@ class SQLiteMetadataBackend:
         try:
             cursor = self._conn.cursor()
             
-            # Query release files for package version
+            # Query release files by joining projects and urls tables
             cursor.execute("""
-                SELECT filename, packagetype, python_version, size, 
-                       upload_time, url, md5_digest, requires_python,
-                       yanked, yanked_reason
-                FROM releases 
-                WHERE package = ? AND version = ?
-                ORDER BY filename
+                SELECT u.url, u.upload_time, u.package_type as packagetype,
+                       u.python_version, u.requires_python, u.size,
+                       u.yanked, u.yanked_reason,
+                       p.name, p.version
+                FROM urls u
+                JOIN projects p ON u.project_id = p.id
+                WHERE p.name = ? AND p.version = ?
             """, (package_name, version))
-            
+
             releases = []
             for row in cursor.fetchall():
                 release = dict(row)
-                # Convert to format expected by existing code
-                release['digests'] = {'md5': release['md5_digest']}
+                # Extract filename from URL
+                url = release.get('url', '')
+                release['filename'] = url.split('/')[-1] if url else ''
+                # Add empty digests (not available in this schema)
+                release['digests'] = {}
                 releases.append(release)
                 
             return releases

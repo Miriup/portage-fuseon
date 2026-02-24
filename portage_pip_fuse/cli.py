@@ -457,9 +457,9 @@ To unmount:
     )
 
     mount_parser.add_argument(
-        '--no-timestamps',
+        '--timestamps',
         action='store_true',
-        help='Disable PyPI timestamp lookup for faster performance (uses current time for all files)'
+        help='Enable PyPI timestamp lookup (slower, uses actual upload times for file mtimes)'
     )
 
     mount_parser.add_argument(
@@ -560,7 +560,7 @@ To unmount:
         'use_flags': use_flags,
         'days': args.filter_days,
         'count': args.filter_count,
-        'no_timestamps': args.no_timestamps,
+        'no_timestamps': not args.timestamps,
         'use_sqlite': use_sqlite
     }
     
@@ -635,8 +635,8 @@ To unmount:
         if use_flags:
             print(f"With USE flags: {', '.join(use_flags)}")
 
-    if args.no_timestamps:
-        print("Timestamps disabled for faster performance")
+    if args.timestamps:
+        print("Timestamps enabled (using PyPI upload times)")
 
     if pid_file_path:
         print(f"PID file: {pid_file_path}")
