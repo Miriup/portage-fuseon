@@ -322,15 +322,22 @@ cache-formats = md5-dict
         
         This prevents listing versions that would generate empty PYTHON_COMPAT.
         """
+        # Check cache first
+        cache_key = f"python_compat_{pypi_name}_{version}"
+        if cache_key in self._metadata_cache:
+            return self._metadata_cache[cache_key]
+            
         try:
             # Get version-specific package info
             package_info = self.pypi_extractor.get_complete_package_info(pypi_name, version)
             if not package_info:
+                self._metadata_cache[cache_key] = False
                 return False
             
             python_versions = package_info.get('python_versions', [])
             if not python_versions:
                 # No Python version info - might be okay, let it through
+                self._metadata_cache[cache_key] = True
                 return True
             
             # Check if ANY version is valid for Gentoo
@@ -339,11 +346,13 @@ cache-formats = md5-dict
             python_compat = extractor.format_python_compat(python_versions)
             
             # If PYTHON_COMPAT would be empty, don't show this version
-            return len(python_compat) > 0
+            result = len(python_compat) > 0
+            self._metadata_cache[cache_key] = result
+            return result
             
         except Exception as e:
             logger.debug(f"Error checking Python compat for {pypi_name}-{version}: {e}")
-            # On error, be permissive
+            # On error, be permissive but don't cache
             return True
     
     def _translate_version(self, pypi_version: str) -> Optional[str]:
@@ -410,13 +419,10 @@ cache-formats = md5-dict
                     
                 gentoo_ver = self._translate_version(pypi_ver)
                 if gentoo_ver:
-                    # Additional check: would this version have valid PYTHON_COMPAT?
-                    # We need to check if the package would have any valid Python implementations
-                    # This prevents showing versions with empty PYTHON_COMPAT
-                    if self._would_have_valid_python_compat(pypi_name, pypi_ver):
-                        gentoo_versions.append(gentoo_ver)
-                    else:
-                        logger.debug(f"Skipping {pypi_name}-{pypi_ver}: would have empty PYTHON_COMPAT")
+                    # OPTIMIZATION: Skip expensive Python compat check during listing
+                    # The version filter should have already filtered incompatible versions
+                    # and ebuilds will still show correct PYTHON_COMPAT when read
+                    gentoo_versions.append(gentoo_ver)
                     
             sorted_versions = sorted(gentoo_versions, reverse=True)  # Newest first
             
