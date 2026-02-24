@@ -1073,6 +1073,14 @@ To unmount:
     )
 
     mount_parser.add_argument(
+        '--max-versions',
+        type=int,
+        default=0,
+        metavar='N',
+        help='Limit versions shown per package (0=unlimited, default: 0). Lower values speed up directory listings.'
+    )
+
+    mount_parser.add_argument(
         '--test',
         action='store_true',
         help='Run filesystem tests without mounting'
@@ -1175,7 +1183,8 @@ To unmount:
         'days': args.filter_days,
         'count': args.filter_count,
         'no_timestamps': not args.timestamps,
-        'use_sqlite': use_sqlite
+        'use_sqlite': use_sqlite,
+        'max_versions': args.max_versions
     }
     
     if args.test:

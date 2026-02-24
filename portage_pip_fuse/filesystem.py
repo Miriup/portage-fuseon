@@ -88,9 +88,17 @@ class PortagePipFS(Operations):
         
         # Content cache: path -> (content, timestamp)
         self._content_cache: Dict[str, Tuple[bytes, float]] = {}
-        
+
         # Package metadata cache: pypi_name -> (metadata, timestamp)
         self._metadata_cache: Dict[str, Tuple[dict, float]] = {}
+
+        # Package JSON cache: pypi_name -> (json_data, timestamp)
+        # This caches the raw get_package_json result to avoid redundant calls
+        self._package_json_cache: Dict[str, Tuple[Optional[dict], float]] = {}
+
+        # Category listing cache: category -> (package_list, timestamp)
+        # Caches the expensive dev-python/ listing to avoid re-computing on each readdir
+        self._category_cache: Dict[str, Tuple[List[str], float]] = {}
         
         # Name translation components
         self.name_translator = create_prefetched_translator()
@@ -133,6 +141,10 @@ class PortagePipFS(Operations):
         
         # Timestamp lookup setting
         self.no_timestamps = (filter_config or {}).get('no_timestamps', True)
+
+        # Maximum versions to show per package (0 = unlimited)
+        # Limiting versions significantly speeds up readdir for packages with many releases
+        self.max_versions = (filter_config or {}).get('max_versions', 0)
         
         logger.info(f"PortagePipFS initialized with filter: {self.package_filter.get_description()}")
         if self.version_filter_chain:
@@ -327,6 +339,37 @@ cache-formats = md5-dict
             logger.error(f"Failed to fetch metadata for {pypi_name}: {e}")
             return None
 
+    def _get_cached_package_json(self, pypi_name: str) -> Optional[dict]:
+        """
+        Get package JSON with filesystem-level caching.
+
+        This wraps pypi_extractor.get_package_json() with an additional cache
+        layer to avoid redundant calls within the same session. Multiple methods
+        (versions, exists, upload_time, ebuild, manifest) all need the same JSON
+        data, so caching here reduces calls from ~8 per package to 1.
+
+        Args:
+            pypi_name: PyPI package name
+
+        Returns:
+            Package JSON dict or None if not found
+        """
+        # Check filesystem-level cache first
+        if pypi_name in self._package_json_cache:
+            json_data, timestamp = self._package_json_cache[pypi_name]
+            if time.time() - timestamp < self.cache_ttl:
+                return json_data
+            else:
+                del self._package_json_cache[pypi_name]
+
+        # Fetch from extractor (which has its own cache)
+        json_data = self._get_cached_package_json(pypi_name)
+
+        # Cache the result (including None for negative caching)
+        self._package_json_cache[pypi_name] = (json_data, time.time())
+
+        return json_data
+
     def _package_exists(self, pypi_name: str) -> bool:
         """
         Lightweight check if a PyPI package exists.
@@ -341,7 +384,7 @@ cache-formats = md5-dict
                 return result
 
         try:
-            json_data = self.pypi_extractor.get_package_json(pypi_name)
+            json_data = self._get_cached_package_json(pypi_name)
             exists = json_data is not None and 'releases' in json_data
             self._metadata_cache[cache_key] = (exists, time.time())
             return exists
@@ -356,7 +399,7 @@ cache-formats = md5-dict
         Converts Gentoo version back to PyPI format and checks releases.
         """
         try:
-            json_data = self.pypi_extractor.get_package_json(pypi_name)
+            json_data = self._get_cached_package_json(pypi_name)
             if not json_data or 'releases' not in json_data:
                 return False
 
@@ -444,7 +487,7 @@ cache-formats = md5-dict
         
         try:
             # Get raw PyPI JSON data which contains releases
-            json_data = self.pypi_extractor.get_package_json(pypi_name)
+            json_data = self._get_cached_package_json(pypi_name)
             if not json_data or 'releases' not in json_data:
                 # Cache empty result to avoid repeated failed lookups
                 self._metadata_cache[cache_key] = ([], time.time())
@@ -498,10 +541,14 @@ cache-formats = md5-dict
                     gentoo_versions.append(gentoo_ver)
                     
             sorted_versions = sorted(gentoo_versions, reverse=True)  # Newest first
-            
+
+            # Apply version limit if configured (for faster readdir)
+            if self.max_versions > 0 and len(sorted_versions) > self.max_versions:
+                sorted_versions = sorted_versions[:self.max_versions]
+
             # Cache the versions list
             self._metadata_cache[cache_key] = (sorted_versions, time.time())
-            
+
             return sorted_versions
             
         except Exception as e:
@@ -522,7 +569,7 @@ cache-formats = md5-dict
         """
         try:
             # Get package JSON data with release info
-            json_data = self.pypi_extractor.get_package_json(pypi_name)
+            json_data = self._get_cached_package_json(pypi_name)
             if not json_data:
                 return time.time()
             
@@ -777,43 +824,55 @@ cache-formats = md5-dict
                 pass
 
             elif parsed['type'] == 'category' and parsed['category'] == 'dev-python':
-                # Use the configured filter to get packages
-                try:
-                    import time
-                    start_time = time.time()
+                # Check cache first
+                cache_key = 'dev-python'
+                use_cache = False
+                if cache_key in self._category_cache:
+                    cached_packages, timestamp = self._category_cache[cache_key]
+                    if time.time() - timestamp < self.cache_ttl:
+                        logger.debug(f"Using cached package list ({len(cached_packages)} packages)")
+                        entries.extend(cached_packages)
+                        use_cache = True
+                    else:
+                        del self._category_cache[cache_key]
 
-                    logger.info(f"Listing packages using filter: {self.package_filter.get_description()}")
+                if not use_cache:
+                    # Use the configured filter to get packages
+                    try:
+                        start_time = time.time()
 
-                    # Get PyPI packages from the filter
-                    pypi_packages = self.package_filter.get_packages()
+                        logger.info(f"Listing packages using filter: {self.package_filter.get_description()}")
 
-                    # Convert PyPI names to Gentoo names
-                    # For packages without existing Gentoo names, use the PyPI name directly
-                    gentoo_packages = []
-                    for pypi_name in pypi_packages:
-                        # Check for interrupts during conversion
-                        check_interrupt()
+                        # Get PyPI packages from the filter
+                        pypi_packages = self.package_filter.get_packages()
 
-                        gentoo_name = self.name_translator.pypi_to_gentoo(pypi_name)
-                        if gentoo_name:
-                            gentoo_packages.append(gentoo_name)
-                        else:
-                            # Use PyPI name directly (it will be translated back when accessed)
-                            # This allows us to provide PyPI packages that don't exist in Gentoo yet
-                            gentoo_packages.append(pypi_name.lower().replace('_', '-').replace('.', '-'))
+                        # Convert PyPI names to Gentoo names
+                        gentoo_packages = []
+                        for pypi_name in pypi_packages:
+                            check_interrupt()
 
-                    entries.extend(sorted(gentoo_packages))
+                            gentoo_name = self.name_translator.pypi_to_gentoo(pypi_name)
+                            if gentoo_name:
+                                gentoo_packages.append(gentoo_name)
+                            else:
+                                # Use PyPI name directly (normalized)
+                                gentoo_packages.append(pypi_name.lower().replace('_', '-').replace('.', '-'))
 
-                    elapsed = time.time() - start_time
-                    logger.info(f"Listed {len(gentoo_packages)} packages in {elapsed:.2f} seconds")
+                        sorted_packages = sorted(gentoo_packages)
 
-                except InterruptedError:
-                    logger.info("Package listing interrupted")
-                    # Return minimal result on interrupt
-                except Exception as e:
-                    logger.error(f"Error listing packages: {e}")
-                    # Fallback to empty list on error
-                    logger.warning("Package listing failed, returning empty directory")
+                        # Cache the result
+                        self._category_cache[cache_key] = (sorted_packages, time.time())
+
+                        entries.extend(sorted_packages)
+
+                        elapsed = time.time() - start_time
+                        logger.info(f"Listed {len(gentoo_packages)} packages in {elapsed:.2f} seconds")
+
+                    except InterruptedError:
+                        logger.info("Package listing interrupted")
+                    except Exception as e:
+                        logger.error(f"Error listing packages: {e}")
+                        logger.warning("Package listing failed, returning empty directory")
 
             elif parsed['type'] == 'package':
                 # List versions and files for a package
@@ -928,7 +987,46 @@ cache-formats = md5-dict
             logger.error(f"Error generating content for {path}: {e}")
             
         return None
-        
+
+    def _escape_double_quotes(self, value: str) -> str:
+        """
+        Escape a string for use in double-quoted shell/bash context.
+
+        In double-quoted strings, these characters have special meaning and
+        must be escaped with a backslash:
+        - \\ (backslash) - escape character itself
+        - $ - variable expansion
+        - ` - command substitution
+        - " - ends the string
+        - ! - history expansion (bash interactive, but escape for safety)
+
+        Uses standard shell escaping with backslashes, which is the same
+        approach used by shlex but for double-quote context.
+
+        Args:
+            value: The string to escape
+
+        Returns:
+            Escaped string safe for double-quoted shell context
+
+        Examples:
+            >>> fs._escape_double_quotes('simple text')
+            'simple text'
+            >>> fs._escape_double_quotes('has `backticks`')
+            'has \\\\`backticks\\\\`'
+            >>> fs._escape_double_quotes('costs $5')
+            'costs \\\\$5'
+        """
+        if not value:
+            return value
+        # Order matters: escape backslashes first, then other special chars
+        value = value.replace('\\', '\\\\')
+        value = value.replace('$', '\\$')
+        value = value.replace('`', '\\`')
+        value = value.replace('"', '\\"')
+        value = value.replace('!', '\\!')
+        return value
+
     def _generate_ebuild(self, category: str, package: str, version: str) -> Optional[str]:
         """Generate ebuild content."""
         # Convert Gentoo package name to PyPI name
@@ -945,7 +1043,7 @@ cache-formats = md5-dict
         # We need to use raw PyPI JSON data since the metadata structure doesn't have all_versions
         pypi_version = None
         try:
-            json_data = self.pypi_extractor.get_package_json(pypi_name)
+            json_data = self._get_cached_package_json(pypi_name)
             if json_data and 'releases' in json_data:
                 for pypi_ver in json_data['releases']:
                     if self._translate_version(pypi_ver) == version:
@@ -993,7 +1091,7 @@ cache-formats = md5-dict
             f"PYPI_PN=\"{data.get('PYPI_PN', data.get('PN', ''))}\"",
             f"PYPI_PV=\"{data.get('PYPI_PV', data.get('PV', ''))}\"",
             f"",
-            f"DESCRIPTION=\"{data.get('DESCRIPTION', 'Python package from PyPI')}\"",
+            f"DESCRIPTION=\"{self._escape_double_quotes(data.get('DESCRIPTION', 'Python package from PyPI'))}\"",
             f"HOMEPAGE=\"{data.get('HOMEPAGE', 'https://pypi.org/project/' + data.get('PN', ''))}\"",
             f"",
             f"LICENSE=\"{data.get('LICENSE', 'unknown')}\"",
@@ -1072,7 +1170,7 @@ cache-formats = md5-dict
 
         # Get the versions from raw PyPI JSON (get_complete_package_info doesn't have all_versions)
         try:
-            json_data = self.pypi_extractor.get_package_json(pypi_name)
+            json_data = self._get_cached_package_json(pypi_name)
             if not json_data or 'releases' not in json_data:
                 return None
             all_versions = list(json_data['releases'].keys())
