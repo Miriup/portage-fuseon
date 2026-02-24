@@ -831,6 +831,9 @@ class EbuildDataExtractor:
         cls._cache_timestamp = current_time
         return fallback
     
+    # Class-level cache for format_python_compat results (shared across instances)
+    _compat_cache = {}
+    
     @timed_operation("ebuild_extractor.format_python_compat")
     def format_python_compat(self, python_versions: List[str]) -> str:
         """
@@ -854,6 +857,11 @@ class EbuildDataExtractor:
             >>> 'python3_11' in compat  # Should not auto-extend
             False
         """
+        # Check cache first
+        cache_key = tuple(sorted(python_versions)) if python_versions else ()
+        if cache_key in self._compat_cache:
+            return self._compat_cache[cache_key]
+        
         if not python_versions:
             # Get system PYTHON_TARGETS as fallback
             try:
