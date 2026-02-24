@@ -23,6 +23,7 @@ from typing import Optional, Dict, List, Set, Tuple
 
 from fuse import FUSE, FuseOSError, Operations
 
+from .constants import REPO_NAME
 from .prefetcher import create_prefetched_translator
 from .pip_metadata import PyPIMetadataExtractor, EbuildDataExtractor
 from .prefetcher import PyPIPrefetcher
@@ -101,7 +102,7 @@ class PortagePipFS(Operations):
         
         # Static files
         self.static_files = {
-            "/profiles/repo_name": b"portage-pip-fuse\n",
+            "/profiles/repo_name": (REPO_NAME + "\n").encode('utf-8'),
             "/metadata/layout.conf": self._generate_layout_conf().encode('utf-8')
         }
         
@@ -167,7 +168,7 @@ class PortagePipFS(Operations):
         
     def _generate_layout_conf(self) -> str:
         """Generate layout.conf for the overlay."""
-        return """repo-name = portage-pip-fuse
+        return f"""repo-name = {REPO_NAME}
 masters = gentoo
 thin-manifests = true
 profile-formats = portage-2

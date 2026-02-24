@@ -24,6 +24,7 @@ except ImportError:
     HAS_PORTAGE = False
 
 from portage_pip_fuse.name_translator import CachedNameTranslator
+from portage_pip_fuse.constants import REPO_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,10 @@ class RepositoryScanner:
                 repo_config = settings.repositories
                 for repo in repo_config:
                     if repo.location:
+                        # Skip our own FUSE filesystem to avoid recursion/issues
+                        if repo.name == REPO_NAME:
+                            logger.debug(f"Skipping FUSE repository '{repo.name}' at {repo.location}")
+                            continue
                         repositories[repo.name] = repo.location
                         logger.debug(f"Found repository '{repo.name}' at {repo.location}")
             except Exception as e:
@@ -87,9 +92,8 @@ class RepositoryScanner:
         if not repositories:
             # Check common repository locations
             common_paths = [
+                "/var/db/repos",  # Check parent directory for multiple repos
                 "/var/db/repos/gentoo",
-                "/usr/portage",
-                "/var/lib/layman",
                 "/var/lib/overlays",
             ]
             
@@ -98,11 +102,19 @@ class RepositoryScanner:
                     if os.path.isdir(os.path.join(path, "dev-python")):
                         # This looks like a repository
                         repo_name = os.path.basename(path)
+                        # Skip our FUSE filesystem
+                        if repo_name == REPO_NAME:
+                            logger.debug(f"Skipping FUSE repository at {path}")
+                            continue
                         repositories[repo_name] = path
                         logger.debug(f"Found repository at {path}")
                     elif os.path.isdir(path):
                         # Check subdirectories
                         for subdir in os.listdir(path):
+                            # Skip our FUSE filesystem (it might be mounted as 'pypi' but identify as REPO_NAME)
+                            if subdir == 'pypi' or subdir == REPO_NAME:
+                                logger.debug(f"Skipping FUSE repository '{subdir}'")
+                                continue
                             subpath = os.path.join(path, subdir)
                             if os.path.isdir(os.path.join(subpath, "dev-python")):
                                 repositories[subdir] = subpath
