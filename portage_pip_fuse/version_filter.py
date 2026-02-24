@@ -316,7 +316,7 @@ class VersionFilterPythonCompat(VersionFilterBase):
                 # Be permissive on parse errors - let it through if we have valid Pythons
                 return len(self.supported_pythons) > 0
 
-        # No requires_python - fall back to classifiers
+        # No requires_python - fall back to classifiers (if available)
         classifiers = info.get('classifiers', [])
         declared_versions = self._extract_python_versions_from_classifiers(classifiers)
 
@@ -333,7 +333,10 @@ class VersionFilterPythonCompat(VersionFilterBase):
             return False
 
         # No Python version info at all - be permissive
-        return len(self.supported_pythons) > 0
+        # Many packages don't set requires_python even though they work with modern Python
+        # The ebuild will show empty PYTHON_COMPAT which signals the user to check manually
+        logger.debug(f"Version {version} of {pypi_name} has no Python version info - including (permissive)")
+        return True
     
     def _extract_python_versions_from_classifiers(self, classifiers: List[str]) -> List[str]:
         """

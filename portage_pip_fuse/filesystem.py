@@ -451,11 +451,24 @@ cache-formats = md5-dict
                 # Build version metadata dict for filtering
                 versions_metadata = {}
                 for version, release_info in releases.items():
-                    # Each version needs metadata with urls for source-dist filter
+                    # Get version-specific requires_python from release files
+                    # (the global info.requires_python is only for the latest version)
+                    version_requires_python = None
+                    for file_info in release_info:
+                        if file_info.get('requires_python'):
+                            version_requires_python = file_info['requires_python']
+                            break
+
+                    # Build version-specific info dict
+                    version_info = {
+                        'requires_python': version_requires_python,
+                        # Note: classifiers are not available per-version in bulk JSON,
+                        # so we don't include them - requires_python is authoritative
+                    }
+
                     versions_metadata[version] = {
                         'urls': release_info,  # Release info contains list of files
-                        'info': json_data.get('info', {}),  # Package info (for requires_python)
-                        # We'll add a lazy load mechanism for python_versions later
+                        'info': version_info,  # Version-specific info
                         'pypi_name': pypi_name,
                         'version': version
                     }
