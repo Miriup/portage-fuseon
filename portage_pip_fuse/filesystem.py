@@ -29,8 +29,12 @@ from .pip_metadata import PyPIMetadataExtractor, EbuildDataExtractor
 from .prefetcher import PyPIPrefetcher
 from .package_filter import (
     FilterBase, FilterAll, FilterCurated, FilterRecent, 
-    FilterNewest, FilterDependencyTree, FilterChain, FilterRegistry,
-    FilterSourceDistribution
+    FilterNewest, FilterDependencyTree, FilterChain, FilterRegistry
+)
+from .version_filter import (
+    VersionFilterBase,
+    VersionFilterRegistry,
+    VersionFilterChain
 )
 
 # Import gs-pypi version parsing
@@ -109,6 +113,9 @@ class PortagePipFS(Operations):
         # Set up package filter based on configuration
         self.package_filter = self._create_filter(filter_config or {})
         
+        # Set up version filters from config
+        self.version_filter_chain = self._create_version_filter(filter_config or {})
+        
         # Pre-resolve dependency trees during initialization
         # This avoids slow first directory listings
         if hasattr(self.package_filter, 'initialize'):
@@ -119,9 +126,40 @@ class PortagePipFS(Operations):
         self.no_timestamps = (filter_config or {}).get('no_timestamps', False)
         
         logger.info(f"PortagePipFS initialized with filter: {self.package_filter.get_description()}")
+        if self.version_filter_chain:
+            logger.info(f"Version filters: {self.version_filter_chain.get_description()}")
         if self.no_timestamps:
             logger.info("Timestamp lookup disabled for faster performance")
         
+    def _create_version_filter(self, filter_config: Dict) -> Optional[VersionFilterChain]:
+        """Create version filter chain based on configuration."""
+        version_filters = filter_config.get('version_filters', ['source-dist', 'python-compat'])
+        
+        if not version_filters:
+            return None
+            
+        filters = []
+        for filter_name in version_filters:
+            if filter_name == 'source-dist':
+                filter_class = VersionFilterRegistry.get_filter_class('source-dist')
+                if filter_class:
+                    filters.append(filter_class())
+            elif filter_name == 'python-compat':
+                filter_class = VersionFilterRegistry.get_filter_class('python-compat')
+                if filter_class:
+                    filters.append(filter_class())
+            elif filter_name == 'latest':
+                filter_class = VersionFilterRegistry.get_filter_class('latest')
+                if filter_class:
+                    max_versions = filter_config.get('max_versions', 5)
+                    filters.append(filter_class(max_versions=max_versions))
+            else:
+                logger.warning(f"Unknown version filter: {filter_name}")
+        
+        if filters:
+            return VersionFilterChain(filters)
+        return None
+    
     def _create_filter(self, filter_config: Dict) -> FilterBase:
         """Create package filter based on configuration."""
         active_filters = filter_config.get('active_filters', [])
@@ -153,10 +191,6 @@ class PortagePipFS(Operations):
                     use_flags=use_flags,
                     cache_dir=self.pypi_extractor.cache_dir
                 ))
-            elif filter_name == 'python-compat':
-                filters.append(filter_class(cache_dir=self.pypi_extractor.cache_dir))
-            elif filter_name == 'source-dist':
-                filters.append(filter_class(cache_dir=self.pypi_extractor.cache_dir))
             else:
                 # Default constructor
                 filters.append(filter_class())
@@ -315,10 +349,26 @@ cache-formats = md5-dict
                 self._metadata_cache[cache_key] = ([], time.time())
                 return []
             
+            # Apply version filters if configured
+            releases = json_data['releases']
+            if self.version_filter_chain:
+                # Build version metadata dict for filtering
+                versions_metadata = {}
+                for version, release_info in releases.items():
+                    # Each version needs metadata with urls for source-dist filter
+                    versions_metadata[version] = {
+                        'urls': release_info,  # Release info contains list of files
+                        'info': json_data.get('info', {})  # Package info for python compat
+                    }
+                
+                # Apply filters
+                filtered_versions = self.version_filter_chain.filter_versions(pypi_name, versions_metadata)
+                releases = {v: json_data['releases'][v] for v in filtered_versions}
+            
             gentoo_versions = []
-            for pypi_ver in json_data['releases']:
+            for pypi_ver in releases:
                 # Skip versions with no files (yanked or empty releases)
-                if not json_data['releases'][pypi_ver]:
+                if not releases[pypi_ver]:
                     continue
                     
                 gentoo_ver = self._translate_version(pypi_ver)

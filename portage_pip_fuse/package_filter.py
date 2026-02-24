@@ -658,8 +658,13 @@ class FilterAll(FilterBase):
         return packages
 
 
+# NOTE: FilterPythonCompat has been moved to version_filter.py as VersionFilterPythonCompat
+# Python compatibility filtering now happens at the version level when ebuilds are generated.
+
 class FilterPythonCompat(FilterBase):
     """
+    DEPRECATED: Moved to version_filter.py as VersionFilterPythonCompat.
+    
     Filter packages based on Python compatibility with the current Gentoo system.
     
     This filter checks if packages have any overlap with the Python implementations
@@ -676,7 +681,7 @@ class FilterPythonCompat(FilterBase):
     
     @classmethod
     def is_default_filter(cls) -> bool:
-        """This filter is NOT enabled by default - it's too expensive for large package sets."""
+        """DEPRECATED: This filter has been moved to version level."""
         return False
     
     def get_packages(self) -> Set[str]:
@@ -756,8 +761,13 @@ class FilterPythonCompat(FilterBase):
         return set()
 
 
+# NOTE: FilterSourceDistribution has been moved to version_filter.py as VersionFilterSourceDist
+# Source distribution filtering now happens at the version level when ebuilds are generated.
+
 class FilterSourceDistribution(FilterBase):
     """
+    DEPRECATED: Moved to version_filter.py as VersionFilterSourceDist.
+    
     Filter packages that have source distributions available.
     
     This filter excludes wheel-only packages that don't have source code available,
@@ -773,8 +783,8 @@ class FilterSourceDistribution(FilterBase):
     
     @classmethod
     def is_default_filter(cls) -> bool:
-        """This filter is enabled by default."""
-        return True
+        """DEPRECATED: This filter has been moved to version level."""
+        return False
     
     def get_packages(self) -> Set[str]:
         """Return packages that have source distributions available."""
@@ -842,7 +852,9 @@ class FilterRegistry:
         'recent': FilterRecent, 
         'newest': FilterNewest,
         'deps': FilterDependencyTree,
-        'python-compat': FilterPythonCompat,
+        # DEPRECATED: These have been moved to version-level filtering
+        # They remain for backward compatibility but return NO_RESTRICTION
+        'python-compat': FilterPythonCompat,  
         'source-dist': FilterSourceDistribution,
     }
     
