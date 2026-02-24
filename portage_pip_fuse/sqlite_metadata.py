@@ -511,36 +511,92 @@ class SQLiteMetadataBackend:
             print(f"📊 Final size: {self._format_size(final_size)}")
             print(f"📁 Location: {self.db_path}")
             
+            # Create indexes for faster queries
+            self._create_indexes()
+
             return True
-            
+
         except URLError as e:
             logger.error(f"Failed to download database: {e}")
             return False
         except Exception as e:
             logger.error(f"Error downloading database: {e}")
             return False
-            
+
+    def _create_indexes(self, quiet: bool = False) -> bool:
+        """
+        Create indexes on the database for faster queries.
+
+        This is idempotent - indexes are created with IF NOT EXISTS.
+        Called after decompression and on connect for existing databases.
+
+        Args:
+            quiet: If True, don't print progress messages
+
+        Returns:
+            True if indexes created/verified, False on error
+        """
+        try:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            cursor = conn.cursor()
+
+            # Check if indexes already exist
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_projects_name'")
+            if cursor.fetchone():
+                conn.close()
+                logger.debug("Indexes already exist")
+                return True
+
+            if not quiet:
+                print("📇 Creating indexes for faster queries...")
+
+            # Index on projects.name for package lookups
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name)")
+
+            # Index on projects.name+version for version-specific lookups
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_projects_name_version ON projects(name, version)")
+
+            # Index on urls.project_id for joining
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_urls_project_id ON urls(project_id)")
+
+            conn.commit()
+            conn.close()
+
+            if not quiet:
+                print("✅ Indexes created")
+            else:
+                logger.info("Created database indexes for faster queries")
+
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Failed to create indexes: {e}")
+            return False
+
     def _connect_database(self) -> bool:
         """
         Connect to SQLite database.
-        
+
         Returns:
             True if connection successful, False otherwise
         """
         if self._conn is not None:
             return True
-            
+
         if not self.db_path.exists():
             logger.error("Database file does not exist")
             return False
-            
+
         try:
             # check_same_thread=False allows connection to be used from FUSE threads
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row  # Enable dict-like access
             logger.info("Connected to SQLite database")
+
+            # Ensure indexes exist (creates them if missing, fast if present)
+            self._create_indexes(quiet=True)
+
             return True
-            
+
         except sqlite3.Error as e:
             logger.error(f"Failed to connect to database: {e}")
             return False
@@ -719,7 +775,58 @@ class SQLiteMetadataBackend:
         except sqlite3.Error as e:
             logger.error(f"Database error getting package releases: {e}")
             return []
-            
+
+    def get_all_package_releases(self, package_name: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get all releases for all versions of a package in a single query.
+
+        This is much more efficient than calling get_package_releases() for
+        each version, as it executes only one SQL query instead of N queries.
+
+        Args:
+            package_name: Name of PyPI package
+
+        Returns:
+            Dict mapping version strings to lists of release file dictionaries
+        """
+        if not self.ensure_database():
+            logger.error("Database not available")
+            return {}
+
+        try:
+            cursor = self._conn.cursor()
+
+            # Query all release files for this package in one query
+            cursor.execute("""
+                SELECT u.url, u.upload_time, u.package_type as packagetype,
+                       u.python_version, u.requires_python, u.size,
+                       u.yanked, u.yanked_reason,
+                       p.name, p.version
+                FROM urls u
+                JOIN projects p ON u.project_id = p.id
+                WHERE p.name = ?
+            """, (package_name,))
+
+            # Group results by version
+            releases_by_version: Dict[str, List[Dict[str, Any]]] = {}
+            for row in cursor.fetchall():
+                release = dict(row)
+                version = release.pop('version')
+                # Also remove 'name' as it's redundant
+                release.pop('name', None)
+                # Extract filename from URL
+                url = release.get('url', '')
+                release['filename'] = url.split('/')[-1] if url else ''
+                # Add empty digests (not available in this schema)
+                release['digests'] = {}
+                releases_by_version.setdefault(version, []).append(release)
+
+            return releases_by_version
+
+        except sqlite3.Error as e:
+            logger.error(f"Database error getting all package releases: {e}")
+            return {}
+
     def close(self):
         """Close database connection."""
         if self._conn:

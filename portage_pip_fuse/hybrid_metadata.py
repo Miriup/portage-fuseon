@@ -286,21 +286,12 @@ class HybridMetadataExtractor:
             'keywords': sqlite_metadata.get('keywords', ''),
         }
         
-        # Get releases from SQLite backend
-        releases = {}
+        # Get all releases in a single query (avoids N+1 query problem)
         try:
-            versions = self.sqlite_backend.get_package_versions(package_name)
-            for version in versions:
-                # Check for interrupts between version iterations
-                check_interrupt()
-
-                version_releases = self.sqlite_backend.get_package_releases(package_name, version)
-                if version_releases:
-                    releases[version] = version_releases
-        except InterruptedError:
-            raise  # Re-raise interrupts
+            releases = self.sqlite_backend.get_all_package_releases(package_name)
         except Exception as e:
             logger.debug(f"Error getting releases for {package_name}: {e}")
+            releases = {}
         
         return {
             'info': info,
