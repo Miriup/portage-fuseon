@@ -6,6 +6,7 @@ This document outlines the coding style and development practices for the portag
 
 ### Primary Goals
 - Provide FUSE filesystem interface for PyPI packages to Gentoo portage
+- **pip command translation**: Translate `pip install` commands to `emerge` commands
 - Filter packages by Python compatibility with the system (PYTHON_TARGETS)
 - Filter packages to only those with source distributions available
 - Support dependency resolution for specific packages with USE flags
@@ -265,11 +266,57 @@ portage_pip_fuse/
 ├── __init__.py          # Package initialization, version info
 ├── name_translator.py   # Name translation logic
 ├── filesystem.py        # FUSE filesystem implementation
-├── cli.py              # Command-line interface
-├── cache.py            # Caching utilities (future)
-├── metadata.py         # Package metadata handling (future)
-└── utils.py            # Shared utilities
+├── cli.py              # Command-line interface (mount, pip, sync, etc.)
+├── pip_metadata.py      # PyPI metadata extraction and ebuild data
+├── sqlite_metadata.py   # SQLite backend for PyPI database
+├── hybrid_metadata.py   # SQLite + JSON API fallback
+├── version_filter.py    # Version filtering (source-dist, python-compat)
+├── package_filter.py    # Package filtering (deps, recent, etc.)
+├── constants.py         # Configuration constants
+└── prefetcher.py        # Repository scanning utilities
 ```
+
+## CLI Architecture
+
+The CLI (`cli.py`) uses argparse with subcommand dispatch:
+
+```python
+# Main subcommands
+portage-pip-fuse mount      # Mount FUSE filesystem
+portage-pip-fuse unmount    # Unmount filesystem
+portage-pip-fuse install    # Create repos.conf
+portage-pip-fuse sync       # Sync SQLite database
+portage-pip-fuse unsync     # Delete database
+portage-pip-fuse pip        # pip install translation
+```
+
+### pip Subcommand Implementation
+
+The `pip` subcommand (`pip_command()`) translates pip install syntax to emerge:
+
+**Key helper functions:**
+- `_translate_pypi_version()`: Convert PEP 440 versions to Gentoo format (a1→_alpha1, rc→_rc, .post→_p)
+- `_format_gentoo_atom()`: Create Gentoo atoms from package name + specifier
+- `_parse_requirements_file()`: Parse requirements.txt with full pip compatibility
+- `_derive_set_name()`: Generate portage set name from requirements file path
+
+**Flow for `-r requirements.txt`:**
+1. Parse requirements file using pip's packaging library
+2. Translate each requirement to Gentoo atom format
+3. Create `/etc/portage/sets/{project}-dependencies` file
+4. Execute `emerge @{project}-dependencies`
+
+**Version specifier mapping:**
+| PyPI Operator | Gentoo |
+|---------------|--------|
+| `>=` | `>=pkg-ver` |
+| `==` | `=pkg-ver` |
+| `~=` | `>=pkg-ver` + `<pkg-next` |
+| `!=` | `!=pkg-ver` |
+| `==X.*` | `=pkg-X*` |
+
+**Extras handling:**
+Package extras (`requests[security]`) are reported as USE flag requirements that users should add to `/etc/portage/package.use`.
 
 ## Performance Considerations
 

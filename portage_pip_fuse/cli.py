@@ -12,14 +12,31 @@ Licensed under GPL-2.0
 import argparse
 import logging
 import os
+import re
 import sys
 import signal
+import subprocess
 from pathlib import Path
+from typing import List, Tuple, Optional, Set, Dict, Any
 
 from portage_pip_fuse.filesystem import mount_filesystem, PortagePipFS
 from portage_pip_fuse.package_filter import FilterRegistry
 from portage_pip_fuse.sqlite_metadata import SQLiteMetadataBackend
 from portage_pip_fuse.constants import REPO_NAME, REPO_LOCATION, find_cache_dir
+from portage_pip_fuse.name_translator import pypi_to_gentoo
+
+# Try to import pip's packaging library for requirement parsing
+try:
+    from pip._vendor.packaging.requirements import Requirement, InvalidRequirement
+    from pip._vendor.packaging.specifiers import SpecifierSet
+except ImportError:
+    try:
+        from packaging.requirements import Requirement, InvalidRequirement
+        from packaging.specifiers import SpecifierSet
+    except ImportError:
+        Requirement = None
+        InvalidRequirement = ValueError
+        SpecifierSet = None
 
 
 def signal_handler(signum, frame):
@@ -74,6 +91,508 @@ def check_fuse_availability():
         print("Error: FUSE not available on this system")
         print("Make sure FUSE kernel module is loaded: modprobe fuse")
         sys.exit(1)
+
+
+def _translate_pypi_version(pypi_version: str) -> str:
+    """
+    Translate PyPI version string to Gentoo format.
+
+    Converts PEP 440 pre-release and post-release markers:
+    - a/alpha -> _alpha (e.g., 2.0a0 -> 2.0_alpha0)
+    - b/beta -> _beta (e.g., 1.0b1 -> 1.0_beta1)
+    - rc/c -> _rc (e.g., 3.0rc1 -> 3.0_rc1)
+    - .post -> _p (e.g., 1.0.post1 -> 1.0_p1)
+    - .dev -> _pre (e.g., 1.0.dev1 -> 1.0_pre1)
+    """
+    version = pypi_version
+
+    # Handle pre-release markers (must check longer patterns first)
+    version = re.sub(r'\.?alpha(\d+)', r'_alpha\1', version)
+    version = re.sub(r'\.?a(\d+)', r'_alpha\1', version)
+    version = re.sub(r'\.?beta(\d+)', r'_beta\1', version)
+    version = re.sub(r'\.?b(\d+)', r'_beta\1', version)
+    version = re.sub(r'\.?rc(\d+)', r'_rc\1', version)
+    version = re.sub(r'(?<!r)\.?c(\d+)', r'_rc\1', version)
+    version = re.sub(r'\.post(\d+)', r'_p\1', version)
+    version = re.sub(r'\.dev(\d+)', r'_pre\1', version)
+
+    return version
+
+
+def _format_gentoo_atom(package_name: str, specifier=None) -> str:
+    """
+    Format a Gentoo dependency atom from a PyPI package name and optional specifier.
+
+    Args:
+        package_name: PyPI package name
+        specifier: packaging SpecifierSet or None
+
+    Returns:
+        Formatted Gentoo atom (e.g., ">=dev-python/requests-2.0.0")
+    """
+    gentoo_name = pypi_to_gentoo(package_name)
+
+    if specifier is None or (SpecifierSet is not None and len(specifier) == 0):
+        return f"dev-python/{gentoo_name}"
+
+    # Convert PyPI version specifiers to Gentoo format
+    dep_parts = []
+    for spec in specifier:
+        operator = spec.operator
+        version = _translate_pypi_version(spec.version)
+
+        if operator == '==':
+            # Handle wildcard versions: PyPI ==23.* -> Gentoo =pkg-23*
+            if version.endswith('.*'):
+                version = version[:-2] + '*'
+            dep_parts.append(f"=dev-python/{gentoo_name}-{version}")
+        elif operator == '>=':
+            dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+        elif operator == '>':
+            dep_parts.append(f">dev-python/{gentoo_name}-{version}")
+        elif operator == '<=':
+            dep_parts.append(f"<=dev-python/{gentoo_name}-{version}")
+        elif operator == '<':
+            dep_parts.append(f"<dev-python/{gentoo_name}-{version}")
+        elif operator == '!=':
+            if version.endswith('.*'):
+                version = version[:-2] + '*'
+            dep_parts.append(f"!=dev-python/{gentoo_name}-{version}")
+        elif operator == '~=':
+            # Compatible release per PEP 440: ~=1.4 means >=1.4, <2
+            version_parts = version.split('.')
+            if len(version_parts) >= 2:
+                upper_parts = version_parts[:-1]
+                try:
+                    upper_parts[-1] = str(int(upper_parts[-1]) + 1)
+                    upper_version = '.'.join(upper_parts)
+                    dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+                    dep_parts.append(f"<dev-python/{gentoo_name}-{upper_version}")
+                except ValueError:
+                    dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+            else:
+                dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+
+    if len(dep_parts) == 1:
+        return dep_parts[0]
+    else:
+        # Return just the first constraint for simple cases
+        # emerge handles multiple atoms as separate packages
+        return dep_parts[0]
+
+
+def _parse_requirements_file(filename: str) -> List[Tuple[str, Optional[Any], List[str]]]:
+    """
+    Parse a requirements file and return list of (name, specifier, extras) tuples.
+
+    Handles:
+    - Simple package names: requests
+    - Versioned packages: requests>=2.0
+    - Extras: requests[security]
+    - Comments and blank lines
+    - Line continuations (\\)
+    - Environment variables (${VAR})
+
+    Args:
+        filename: Path to requirements file
+
+    Returns:
+        List of (package_name, specifier, extras) tuples
+    """
+    requirements = []
+
+    if Requirement is None:
+        print("Error: packaging library not available")
+        print("Install with: pip install packaging")
+        return requirements
+
+    try:
+        with open(filename, 'r') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"Error: Requirements file not found: {filename}")
+        return requirements
+    except PermissionError:
+        print(f"Error: Permission denied reading: {filename}")
+        return requirements
+
+    # Preprocess: join continued lines, expand env vars
+    lines = []
+    current_line = ""
+
+    for line in content.splitlines():
+        # Join lines ending with backslash
+        if line.rstrip().endswith('\\'):
+            current_line += line.rstrip()[:-1]
+            continue
+        else:
+            current_line += line
+            lines.append(current_line)
+            current_line = ""
+
+    if current_line:  # Handle last line if it had continuation
+        lines.append(current_line)
+
+    for line_num, line in enumerate(lines, start=1):
+        # Strip comments
+        if '#' in line:
+            line = line.split('#')[0]
+        line = line.strip()
+
+        # Skip empty lines
+        if not line:
+            continue
+
+        # Skip options lines (-r, -c, --index-url, etc.)
+        if line.startswith('-'):
+            # Handle nested -r requirements
+            if line.startswith('-r ') or line.startswith('--requirement '):
+                nested_file = line.split(None, 1)[1].strip()
+                # Resolve relative paths
+                if not os.path.isabs(nested_file):
+                    nested_file = os.path.join(os.path.dirname(filename), nested_file)
+                nested_reqs = _parse_requirements_file(nested_file)
+                requirements.extend(nested_reqs)
+            continue
+
+        # Expand environment variables
+        env_var_pattern = re.compile(r'\$\{([A-Z0-9_]+)\}')
+        for match in env_var_pattern.finditer(line):
+            var_name = match.group(1)
+            var_value = os.environ.get(var_name, '')
+            line = line.replace(match.group(0), var_value)
+
+        # Parse the requirement
+        try:
+            req = Requirement(line)
+            requirements.append((req.name, req.specifier, list(req.extras)))
+        except (InvalidRequirement, ValueError) as e:
+            print(f"Warning: Skipping invalid requirement at line {line_num}: {line}")
+            print(f"  Error: {e}")
+            continue
+
+    return requirements
+
+
+def _derive_set_name(requirements_file: str) -> str:
+    """
+    Derive a portage set name from a requirements file path.
+
+    Examples:
+        requirements.txt -> requirements-dependencies
+        my-project/requirements.txt -> my-project-dependencies
+        requirements-dev.txt -> requirements-dev-dependencies
+    """
+    path = Path(requirements_file)
+
+    # Get the filename without extension
+    name = path.stem
+
+    # If it's just "requirements", use parent directory name if available
+    if name == 'requirements' and path.parent.name and path.parent.name != '.':
+        name = path.parent.name
+
+    # Sanitize the name for portage (lowercase, hyphens only)
+    name = re.sub(r'[^a-zA-Z0-9-]', '-', name.lower())
+    name = re.sub(r'-+', '-', name).strip('-')
+
+    return f"{name}-dependencies"
+
+
+def pip_command():
+    """
+    Handle pip subcommand - translates pip install arguments to emerge commands.
+
+    Supports:
+    - pip install package1 package2 ...
+    - pip install -r requirements.txt
+    - pip install --upgrade package
+    - pip install package[extra1,extra2]
+    - pip install package>=1.0
+
+    For -r requirements.txt, creates /etc/portage/sets/{P}-dependencies
+    """
+    pip_parser = argparse.ArgumentParser(
+        prog='portage-pip-fuse pip',
+        description='Translate pip install commands to emerge commands',
+        usage='portage-pip-fuse pip install [options] [packages...]',
+        epilog='''
+Examples:
+  %(prog)s install requests                    # Translate to: emerge dev-python/requests
+  %(prog)s install requests>=2.0 flask         # With version constraints
+  %(prog)s install -r requirements.txt         # Create portage set and emerge it
+  %(prog)s install --upgrade requests          # emerge --update requests
+  %(prog)s install requests[security]          # Package with extras (USE flags)
+
+The -r requirements.txt option creates a portage set file at:
+  /etc/portage/sets/{project}-dependencies
+
+Then runs: emerge @{project}-dependencies
+        ''',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    # We expect 'pip install' as the subcommand structure
+    pip_parser.add_argument(
+        'subcommand',
+        nargs='?',
+        choices=['install'],
+        default='install',
+        help='pip subcommand (currently only install is supported)'
+    )
+
+    pip_parser.add_argument(
+        'packages',
+        nargs='*',
+        help='Package specifiers to install'
+    )
+
+    pip_parser.add_argument(
+        '-r', '--requirement',
+        action='append',
+        dest='requirements',
+        metavar='FILE',
+        help='Install from requirements file(s)'
+    )
+
+    pip_parser.add_argument(
+        '-U', '--upgrade',
+        action='store_true',
+        help='Upgrade packages (translates to emerge --update)'
+    )
+
+    pip_parser.add_argument(
+        '-e', '--editable',
+        action='append',
+        dest='editables',
+        metavar='PATH',
+        help='Editable installs (not supported - will show warning)'
+    )
+
+    pip_parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Show what would be done without executing'
+    )
+
+    pip_parser.add_argument(
+        '--pretend',
+        action='store_true',
+        help='Pass --pretend to emerge (show what would be merged)'
+    )
+
+    pip_parser.add_argument(
+        '--ask',
+        action='store_true',
+        default=True,
+        help='Pass --ask to emerge (default: True)'
+    )
+
+    pip_parser.add_argument(
+        '--no-ask',
+        action='store_true',
+        help='Do not ask for confirmation before emerging'
+    )
+
+    pip_parser.add_argument(
+        '--set-dir',
+        type=str,
+        default='/etc/portage/sets',
+        help='Directory for portage set files (default: /etc/portage/sets)'
+    )
+
+    pip_parser.add_argument(
+        '--no-deps',
+        action='store_true',
+        help='Ignored (emerge always handles dependencies)'
+    )
+
+    pip_parser.add_argument(
+        '--pre',
+        action='store_true',
+        help='Include pre-release versions (passed as ~arch keyword)'
+    )
+
+    # Remove 'pip' from argv and parse remaining args
+    pip_argv = []
+    skip_next = False
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == 'pip':
+            continue
+        pip_argv.append(arg)
+
+    args = pip_parser.parse_args(pip_argv)
+
+    # Check for install subcommand
+    if args.subcommand != 'install':
+        print(f"Error: Only 'pip install' is currently supported")
+        return 1
+
+    # Warn about editable installs
+    if args.editables:
+        print("Warning: Editable installs (-e) are not supported by portage")
+        print("  Skipping:", ', '.join(args.editables))
+
+    # Collect all packages to install
+    all_packages: List[Tuple[str, Optional[Any], List[str]]] = []
+    set_files_created: List[Tuple[str, str]] = []  # (filename, set_name)
+
+    # Parse direct package arguments
+    if args.packages:
+        for pkg_spec in args.packages:
+            # Skip 'install' if it appears as a package
+            if pkg_spec == 'install':
+                continue
+            if Requirement is not None:
+                try:
+                    req = Requirement(pkg_spec)
+                    all_packages.append((req.name, req.specifier, list(req.extras)))
+                except (InvalidRequirement, ValueError) as e:
+                    print(f"Warning: Invalid package specifier: {pkg_spec}")
+                    print(f"  Error: {e}")
+            else:
+                # Fallback: just use the name
+                all_packages.append((pkg_spec, None, []))
+
+    # Parse requirements files
+    if args.requirements:
+        set_dir = Path(args.set_dir)
+
+        for req_file in args.requirements:
+            reqs = _parse_requirements_file(req_file)
+
+            if not reqs:
+                print(f"Warning: No valid requirements found in {req_file}")
+                continue
+
+            # Create portage set file
+            set_name = _derive_set_name(req_file)
+            set_path = set_dir / set_name
+
+            # Generate set file content
+            set_content_lines = [
+                f"# Generated from {req_file}",
+                f"# by portage-pip-fuse pip install -r {req_file}",
+                ""
+            ]
+
+            for name, specifier, extras in reqs:
+                atom = _format_gentoo_atom(name, specifier)
+                if extras:
+                    # Add USE flag comment
+                    use_flags = ' '.join(extras)
+                    set_content_lines.append(f"# USE flags: {use_flags}")
+                set_content_lines.append(atom)
+
+            set_content = '\n'.join(set_content_lines) + '\n'
+
+            if args.dry_run:
+                print(f"\n--- Would create {set_path} ---")
+                print(set_content)
+                print(f"--- End {set_path} ---\n")
+                # Track for emerge command even in dry-run
+                set_files_created.append((str(set_path), set_name))
+            else:
+                # Create set directory if needed
+                try:
+                    set_dir.mkdir(parents=True, exist_ok=True)
+                except PermissionError:
+                    print(f"Error: Permission denied creating {set_dir}")
+                    print("Try running with sudo")
+                    return 1
+
+                # Write set file
+                try:
+                    set_path.write_text(set_content)
+                    print(f"Created portage set: {set_path}")
+                    set_files_created.append((str(set_path), set_name))
+                except PermissionError:
+                    print(f"Error: Permission denied writing {set_path}")
+                    print("Try running with sudo")
+                    return 1
+
+            # Add all requirements to the package list for USE flag handling
+            all_packages.extend(reqs)
+
+    # Check if we have anything to install
+    if not all_packages and not set_files_created and not args.dry_run:
+        print("Error: No packages specified")
+        pip_parser.print_help()
+        return 1
+
+    # Collect USE flag requirements (extras)
+    use_requirements: Dict[str, Set[str]] = {}
+    for name, specifier, extras in all_packages:
+        if extras:
+            gentoo_name = pypi_to_gentoo(name)
+            if gentoo_name not in use_requirements:
+                use_requirements[gentoo_name] = set()
+            use_requirements[gentoo_name].update(extras)
+
+    # Show USE flag requirements
+    if use_requirements:
+        print("\nNote: The following packages require USE flags:")
+        print("Add to /etc/portage/package.use:")
+        for pkg, flags in sorted(use_requirements.items()):
+            print(f"  dev-python/{pkg} {' '.join(sorted(flags))}")
+        print()
+
+    # Build emerge command
+    emerge_cmd = ['emerge']
+
+    if args.ask and not args.no_ask:
+        emerge_cmd.append('--ask')
+
+    if args.pretend:
+        emerge_cmd.append('--pretend')
+
+    if args.upgrade:
+        emerge_cmd.append('--update')
+
+    # If we created set files, emerge the sets
+    if set_files_created:
+        for _, set_name in set_files_created:
+            emerge_cmd.append(f'@{set_name}')
+
+    # Add individual packages (not from requirements files)
+    if args.packages:
+        for pkg_spec in args.packages:
+            if pkg_spec == 'install':
+                continue
+            if Requirement is not None:
+                try:
+                    req = Requirement(pkg_spec)
+                    atom = _format_gentoo_atom(req.name, req.specifier)
+                    emerge_cmd.append(atom)
+                except (InvalidRequirement, ValueError):
+                    gentoo_name = pypi_to_gentoo(pkg_spec)
+                    emerge_cmd.append(f'dev-python/{gentoo_name}')
+            else:
+                gentoo_name = pypi_to_gentoo(pkg_spec)
+                emerge_cmd.append(f'dev-python/{gentoo_name}')
+
+    # Show or execute the command
+    if len(emerge_cmd) > 1:  # More than just 'emerge'
+        cmd_str = ' '.join(emerge_cmd)
+
+        if args.dry_run:
+            print(f"Would run: {cmd_str}")
+        else:
+            print(f"Running: {cmd_str}")
+            try:
+                result = subprocess.run(emerge_cmd)
+                return result.returncode
+            except FileNotFoundError:
+                print("Error: emerge not found. Is Portage installed?")
+                return 1
+            except KeyboardInterrupt:
+                print("\nInterrupted")
+                return 130
+
+    return 0
 
 
 def install_command():
@@ -691,6 +1210,7 @@ Subcommands:
   install   Create /etc/portage/repos.conf entry for the overlay
   sync      Sync PyPI metadata database with latest data
   unsync    Delete the PyPI metadata database
+  pip       Translate pip install commands to emerge
 
 Examples:
   %(prog)s mount                               # Mount at default location ({REPO_LOCATION})
@@ -699,6 +1219,8 @@ Examples:
   %(prog)s install                             # Create repos.conf file
   %(prog)s sync                                # Sync PyPI database
   %(prog)s unsync                              # Delete the database
+  %(prog)s pip install requests                # Install via emerge
+  %(prog)s pip install -r requirements.txt    # Create portage set and emerge
 
 For subcommand help:
   %(prog)s <subcommand> --help
@@ -709,7 +1231,7 @@ For subcommand help:
     parser.add_argument(
         'subcommand',
         nargs='?',
-        choices=['mount', 'unmount', 'install', 'sync', 'unsync'],
+        choices=['mount', 'unmount', 'install', 'sync', 'unsync', 'pip'],
         help='Subcommand to run'
     )
 
@@ -741,6 +1263,8 @@ For subcommand help:
         return sync_command()
     elif subcommand == 'unsync':
         return unsync_command()
+    elif subcommand == 'pip':
+        return pip_command()
     else:
         print(f"Unknown subcommand: {subcommand}")
         parser.print_help()

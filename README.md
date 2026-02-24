@@ -9,6 +9,7 @@ This project provides a virtual filesystem that dynamically generates Gentoo ebu
 ## Features
 
 - **FUSE virtual overlay**: Presents PyPI as a portage-compatible repository
+- **pip command translation**: Run `pip install` commands and have them translated to `emerge`
 - **SQLite metadata backend**: Uses bulk PyPI database (~1GB) for fast lookups instead of 746k+ individual API calls
 - **Smart filtering**: Only shows packages compatible with your system's Python versions
 - **Source distribution filtering**: Only shows packages with source tarballs (required for Gentoo)
@@ -80,7 +81,87 @@ portage-pip-fuse sync [--cache-dir DIR]
 
 # Delete the metadata database
 portage-pip-fuse unsync [--force]
+
+# Translate pip install to emerge (see below)
+portage-pip-fuse pip install [packages...] [-r requirements.txt]
 ```
+
+### pip Command
+
+The `pip` subcommand lets you copy-paste `pip install` commands from documentation and tutorials, translating them to appropriate `emerge` commands.
+
+```bash
+# Basic package installation
+portage-pip-fuse pip install requests flask
+# → emerge --ask dev-python/requests dev-python/flask
+
+# With version constraints
+portage-pip-fuse pip install "django>=4.0" "celery~=5.3.0"
+# → emerge --ask >=dev-python/django-4.0 >=dev-python/celery-5.3.0
+
+# From requirements file (creates portage set)
+portage-pip-fuse pip install -r requirements.txt
+# → Creates /etc/portage/sets/{project}-dependencies
+# → emerge --ask @{project}-dependencies
+
+# Upgrade packages
+portage-pip-fuse pip install --upgrade requests
+# → emerge --ask --update dev-python/requests
+
+# Dry run (show what would happen)
+portage-pip-fuse pip install --dry-run -r requirements.txt
+```
+
+#### pip Options
+
+```
+-r, --requirement FILE   Install from requirements file(s)
+-U, --upgrade            Upgrade packages (emerge --update)
+--dry-run                Show what would be done without executing
+--pretend                Pass --pretend to emerge
+--ask / --no-ask         Control emerge confirmation (default: --ask)
+--set-dir DIR            Directory for portage sets (default: /etc/portage/sets)
+```
+
+#### Version Specifier Translation
+
+| PyPI | Gentoo |
+|------|--------|
+| `>=2.0` | `>=pkg-2.0` |
+| `==2.0.0` | `=pkg-2.0.0` |
+| `~=2.0` | `>=pkg-2.0` (compatible release) |
+| `!=2.0` | `!=pkg-2.0` |
+| `==2.*` | `=pkg-2*` |
+| `2.0a1` | `2.0_alpha1` |
+| `2.0b1` | `2.0_beta1` |
+| `2.0rc1` | `2.0_rc1` |
+| `2.0.post1` | `2.0_p1` |
+
+#### Extras and USE Flags
+
+When packages specify extras (e.g., `requests[security]`), the command shows what USE flags need to be set:
+
+```bash
+$ portage-pip-fuse pip install "requests[security,socks]"
+Note: The following packages require USE flags:
+Add to /etc/portage/package.use:
+  dev-python/requests security socks
+
+Would run: emerge --ask dev-python/requests
+```
+
+#### Requirements File Support
+
+Requirements files are parsed with support for:
+- Package specifiers with versions: `django>=4.0`
+- Extras: `flask[async]`
+- Comments and blank lines
+- Line continuations (`\`)
+- Environment variables (`${VAR}`)
+- Nested `-r` includes
+- Environment markers (passed through)
+
+When using `-r`, a portage set file is created at `/etc/portage/sets/{name}-dependencies` where `{name}` is derived from the requirements file path. This allows you to easily update dependencies later with `emerge @{name}-dependencies`.
 
 ### Mount Options
 
