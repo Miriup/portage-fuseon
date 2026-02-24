@@ -19,6 +19,7 @@ from pathlib import Path
 from portage_pip_fuse.filesystem import mount_filesystem, PortagePipFS
 from portage_pip_fuse.package_filter import FilterRegistry
 from portage_pip_fuse.sqlite_metadata import SQLiteMetadataBackend
+from portage_pip_fuse.constants import REPO_NAME, REPO_LOCATION
 
 
 def signal_handler(signum, frame):
@@ -77,6 +78,71 @@ def check_fuse_availability():
         sys.exit(1)
 
 
+def install_command():
+    """Handle install subcommand - creates repos.conf file."""
+    install_parser = argparse.ArgumentParser(
+        prog='portage-pip-fuse install',
+        description='Create portage repos.conf file for the FUSE overlay'
+    )
+
+    install_parser.add_argument(
+        'mountpoint',
+        nargs='?',
+        default=REPO_LOCATION,
+        help=f'Directory where the filesystem will be mounted (default: {REPO_LOCATION})'
+    )
+
+    install_parser.add_argument(
+        '--priority',
+        type=int,
+        default=50,
+        help='Repository priority (default: 50)'
+    )
+
+    # Remove 'install' from argv and parse remaining args
+    install_argv = [arg for arg in sys.argv[1:] if arg != 'install']
+    args = install_parser.parse_args(install_argv)
+
+    mountpoint = Path(args.mountpoint).resolve()
+    repos_conf_dir = Path('/etc/portage/repos.conf')
+    conf_file = repos_conf_dir / f'{REPO_NAME}.conf'
+
+    conf_content = f"""[{REPO_NAME}]
+location = {mountpoint}
+sync-type =
+auto-sync = no
+priority = {args.priority}
+"""
+
+    # Check if repos.conf directory exists
+    if not repos_conf_dir.exists():
+        print(f"Error: {repos_conf_dir} does not exist")
+        return 1
+
+    # Check if file already exists
+    if conf_file.exists():
+        print(f"Warning: {conf_file} already exists")
+        response = input("Overwrite? [y/N]: ")
+        if response.lower() not in ['y', 'yes']:
+            print("Aborted")
+            return 0
+
+    try:
+        conf_file.write_text(conf_content)
+        print(f"Created {conf_file}")
+        print(f"\nTo use the overlay:")
+        print(f"  1. Mount the filesystem: portage-pip-fuse {mountpoint}")
+        print(f"  2. Emerge packages: emerge -av dev-python/requests")
+        return 0
+    except PermissionError:
+        print(f"Error: Permission denied writing to {conf_file}")
+        print("Try running with sudo")
+        return 1
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
+
+
 def sync_command():
     """Handle sync subcommand."""
     sync_parser = argparse.ArgumentParser(
@@ -124,7 +190,9 @@ def sync_command():
 
 def main():
     """Main CLI entry point."""
-    # Handle subcommands - check for sync anywhere in the args
+    # Handle subcommands
+    if 'install' in sys.argv:
+        return install_command()
     if 'sync' in sys.argv:
         return sync_command()
         
@@ -133,11 +201,12 @@ def main():
         description='Mount a FUSE filesystem that bridges PyPI packages to Gentoo portage',
         epilog='''
 Examples:
-  %(prog)s /mnt/pypi                           # Mount with defaults
-  %(prog)s /mnt/pypi -f                        # Mount in foreground
-  %(prog)s /mnt/pypi -f -d                     # Mount with debug output
-  %(prog)s /mnt/pypi -d --logfile /var/log/pypi.log  # Debug to logfile
-  %(prog)s /mnt/pypi --cache-ttl 600           # Mount with 10-minute cache
+  %(prog)s install                             # Create repos.conf file (default location)
+  %(prog)s install /mnt/pypi                   # Create repos.conf with custom location
+  %(prog)s                                     # Mount at default location
+  %(prog)s /mnt/pypi                           # Mount at custom location
+  %(prog)s -f                                  # Mount in foreground
+  %(prog)s -f -d                               # Mount with debug output
   %(prog)s sync                                # Sync PyPI database
   %(prog)s sync --cache-dir ~/.cache/pypi      # Sync to custom directory
   
@@ -153,8 +222,9 @@ To unmount:
     
     parser.add_argument(
         'mountpoint',
-        nargs='?',  # Make mountpoint optional for test mode
-        help='Directory where the filesystem will be mounted'
+        nargs='?',  # Make mountpoint optional for test mode and default location
+        default=REPO_LOCATION,
+        help=f'Directory where the filesystem will be mounted (default: {REPO_LOCATION})'
     )
     
     parser.add_argument(
@@ -372,9 +442,6 @@ To unmount:
     
     # Check system requirements only if not testing
     if not args.test:
-        if not args.mountpoint:
-            parser.error("mountpoint is required when not using --test")
-            
         check_fuse_availability()
         
         # Validate mountpoint

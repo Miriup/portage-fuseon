@@ -24,7 +24,7 @@ except ImportError:
     HAS_PORTAGE = False
 
 from portage_pip_fuse.name_translator import CachedNameTranslator
-from portage_pip_fuse.constants import REPO_NAME
+from portage_pip_fuse.constants import REPO_NAME, REPO_LOCATION
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +111,8 @@ class RepositoryScanner:
                     elif os.path.isdir(path):
                         # Check subdirectories
                         for subdir in os.listdir(path):
-                            # Skip our FUSE filesystem (it might be mounted as 'pypi' but identify as REPO_NAME)
-                            if subdir == 'pypi' or subdir == REPO_NAME:
+                            # Skip our FUSE filesystem (might be mounted at REPO_LOCATION or identify as REPO_NAME)
+                            if subdir == os.path.basename(REPO_LOCATION) or subdir == REPO_NAME:
                                 logger.debug(f"Skipping FUSE repository '{subdir}'")
                                 continue
                             subpath = os.path.join(path, subdir)

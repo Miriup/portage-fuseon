@@ -13,10 +13,12 @@ Licensed under GPL-2.0
 """
 
 import gzip
+import hashlib
 import json
 import logging
 import os
 import sqlite3
+import struct
 import tempfile
 import time
 import urllib.request
@@ -36,11 +38,17 @@ logger = logging.getLogger(__name__)
 # Default database URL - updated daily
 DEFAULT_PYPI_DATA_URL = "https://github.com/pypi-data/pypi-json-data/releases/download/latest/pypi-data.sqlite.gz"
 
+# GitHub API URL for release metadata (provides SHA256 and file size)
+GITHUB_RELEASES_API_URL = "https://api.github.com/repos/pypi-data/pypi-json-data/releases/latest"
+
 # Cache directory for downloaded SQLite database
 DEFAULT_CACHE_DIR = Path.home() / '.cache' / 'portage-pip-fuse'
 
 # Maximum age before database is considered stale (7 days)
 DEFAULT_MAX_AGE_DAYS = 7
+
+# Expected gzip compression ratio for SQLite databases (used to estimate uncompressed size)
+EXPECTED_GZIP_RATIO = 6.0
 
 
 class SQLiteMetadataBackend:
@@ -122,39 +130,195 @@ class SQLiteMetadataBackend:
         """Format time in seconds to human readable string (MM:SS or HH:MM:SS)."""
         if seconds <= 0 or seconds == float('inf'):
             return "--:--"
-        
+
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
-        
+
         if hours > 0:
             return f"{hours:d}:{minutes:02d}:{secs:02d}"
         else:
             return f"{minutes:2d}:{secs:02d}"
-        
+
+    def _fetch_release_metadata(self) -> Optional[Dict[str, Any]]:
+        """
+        Fetch release metadata from GitHub API.
+
+        Returns:
+            Dict with 'size' (compressed), 'sha256', and 'download_url', or None on error
+        """
+        try:
+            req = urllib.request.Request(GITHUB_RELEASES_API_URL)
+            req.add_header('Accept', 'application/vnd.github.v3+json')
+            req.add_header('User-Agent', 'portage-pip-fuse')
+
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode('utf-8'))
+
+            # Find the sqlite.gz asset
+            for asset in data.get('assets', []):
+                if asset.get('name') == 'pypi-data.sqlite.gz':
+                    digest = asset.get('digest', '')
+                    sha256 = None
+                    if digest.startswith('sha256:'):
+                        sha256 = digest[7:]
+
+                    return {
+                        'size': asset.get('size', 0),
+                        'sha256': sha256,
+                        'download_url': asset.get('browser_download_url', self.database_url)
+                    }
+
+            logger.warning("Could not find pypi-data.sqlite.gz in release assets")
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch release metadata from GitHub API: {e}")
+            return None
+
+    def _fetch_gzip_isize(self, url: str, compressed_size: int) -> Optional[int]:
+        """
+        Fetch the ISIZE field from the last 4 bytes of a remote gzip file.
+
+        The ISIZE is the uncompressed size modulo 2^32.
+
+        Args:
+            url: URL of the gzip file
+            compressed_size: Total size of compressed file (for Range header)
+
+        Returns:
+            ISIZE value (mod 2^32), or None on error
+        """
+        try:
+            req = urllib.request.Request(url)
+            req.add_header('Range', f'bytes={compressed_size - 4}-{compressed_size - 1}')
+            req.add_header('User-Agent', 'portage-pip-fuse')
+
+            with urllib.request.urlopen(req, timeout=30) as response:
+                if response.status == 206:  # Partial Content
+                    data = response.read(4)
+                    if len(data) == 4:
+                        return struct.unpack('<I', data)[0]
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch gzip ISIZE: {e}")
+            return None
+
+    def _estimate_uncompressed_size(self, compressed_size: int, isize: Optional[int] = None) -> int:
+        """
+        Estimate the uncompressed size of a gzip file.
+
+        Uses the compression ratio to estimate the approximate size, then
+        refines it using the gzip ISIZE field (which is mod 2^32) to get
+        the exact size.
+
+        Args:
+            compressed_size: Size of compressed gzip file
+            isize: ISIZE from gzip trailer (mod 2^32), or None
+
+        Returns:
+            Estimated uncompressed size in bytes
+        """
+        # Initial estimate based on compression ratio
+        estimated = int(compressed_size * EXPECTED_GZIP_RATIO)
+
+        if isize is None:
+            return estimated
+
+        # Use ISIZE to get exact size
+        # ISIZE = actual_size mod 2^32
+        # So actual_size = ISIZE + N * 2^32 for some N >= 0
+        modulo = 2 ** 32
+
+        # Calculate N based on our estimate
+        n = round((estimated - isize) / modulo)
+        if n < 0:
+            n = 0
+
+        actual_size = isize + n * modulo
+
+        logger.debug(f"Size estimation: compressed={compressed_size}, estimated={estimated}, "
+                    f"isize={isize}, n={n}, actual={actual_size}")
+
+        return actual_size
+
+    def _verify_sha256(self, file_path: Path, expected_sha256: str) -> bool:
+        """
+        Verify SHA256 checksum of a file.
+
+        Args:
+            file_path: Path to file to verify
+            expected_sha256: Expected SHA256 hash (hex string)
+
+        Returns:
+            True if checksum matches, False otherwise
+        """
+        sha256 = hashlib.sha256()
+
+        try:
+            with open(file_path, 'rb') as f:
+                while True:
+                    chunk = f.read(1024 * 1024)  # 1MB chunks
+                    if not chunk:
+                        break
+                    sha256.update(chunk)
+
+            actual = sha256.hexdigest()
+            if actual == expected_sha256:
+                logger.info(f"SHA256 verification successful: {actual}")
+                return True
+            else:
+                logger.error(f"SHA256 mismatch! Expected: {expected_sha256}, Got: {actual}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to verify SHA256: {e}")
+            return False
+
     def _download_database(self, force: bool = False) -> bool:
         """
         Download SQLite database from pypi-data with resume support.
-        
+
         Uses Gentoo-style resumable downloads: downloads to file.__download__
         and renames when complete. Supports HTTP range requests for resuming.
-        
+        Verifies SHA256 after download and estimates uncompressed size for
+        accurate decompression progress.
+
         Args:
             force: Force download even if database exists and is fresh
-            
+
         Returns:
             True if download successful, False otherwise
         """
         if not force and not self._is_database_stale():
             logger.info("Database is fresh, skipping download")
             return True
-            
+
         logger.info(f"Downloading PyPI metadata database from {self.database_url}")
-        
+
         # Use Gentoo-style download naming
         download_path = Path(str(self.db_path) + '.gz.__download__')
         final_gz_path = Path(str(self.db_path) + '.gz')
-        
+
+        # Fetch release metadata from GitHub API (SHA256, size)
+        release_meta = self._fetch_release_metadata()
+        expected_sha256 = None
+        expected_compressed_size = 0
+        uncompressed_size = 0
+
+        if release_meta:
+            expected_sha256 = release_meta.get('sha256')
+            expected_compressed_size = release_meta.get('size', 0)
+            if expected_sha256:
+                logger.info(f"Expected SHA256: {expected_sha256}")
+            if expected_compressed_size > 0:
+                # Fetch gzip ISIZE to estimate uncompressed size accurately
+                isize = self._fetch_gzip_isize(self.database_url, expected_compressed_size)
+                uncompressed_size = self._estimate_uncompressed_size(expected_compressed_size, isize)
+                logger.info(f"Estimated uncompressed size: {self._format_size(uncompressed_size)}")
+
         try:
             # Check if partial download exists
             resume_pos = 0
@@ -266,15 +430,27 @@ class SQLiteMetadataBackend:
             
             # Rename downloaded file to final name (atomic operation)
             download_path.rename(final_gz_path)
-                            
+
+            # Verify SHA256 checksum if available
+            if expected_sha256:
+                print("🔐 Verifying SHA256 checksum...")
+                if not self._verify_sha256(final_gz_path, expected_sha256):
+                    print("❌ SHA256 verification failed! Removing corrupted file.")
+                    final_gz_path.unlink()
+                    return False
+                print("✅ SHA256 verified")
+
             # Decompress gzipped SQLite file
             print("🗜️  Decompressing database...")
-            
+
             # Get compressed file size for progress
             compressed_size = final_gz_path.stat().st_size
-            
+
+            # Use estimated uncompressed size if available, otherwise fall back to compressed
+            progress_total = uncompressed_size if uncompressed_size > 0 else compressed_size
+
             if HAS_TQDM:
-                with tqdm(total=compressed_size, unit='B', unit_scale=True, unit_divisor=1024,
+                with tqdm(total=progress_total, unit='B', unit_scale=True, unit_divisor=1024,
                         desc="🗜️  Decompress", ncols=80, bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
                     with gzip.open(final_gz_path, 'rb') as gz_file:
                         with open(self.db_path, 'wb') as db_file:
@@ -286,7 +462,7 @@ class SQLiteMetadataBackend:
                                 db_file.write(chunk)
                                 processed += len(chunk)
                                 pbar.update(len(chunk))
-                                
+
                                 # Flush every 10MB to ensure data is written
                                 if processed % (10 * 1024 * 1024) == 0:
                                     db_file.flush()
@@ -295,6 +471,7 @@ class SQLiteMetadataBackend:
                 with gzip.open(final_gz_path, 'rb') as gz_file:
                     with open(self.db_path, 'wb') as db_file:
                         processed = 0
+                        start_time = time.time()
                         while True:
                             chunk = gz_file.read(1024 * 1024)  # 1MB chunks
                             if not chunk:
@@ -302,7 +479,23 @@ class SQLiteMetadataBackend:
                             db_file.write(chunk)
                             processed += len(chunk)
                             if processed % (10 * 1024 * 1024) == 0:  # Every 10MB
-                                print(f"\r🗜️  Processed: {self._format_size(processed)}", end='', flush=True)
+                                if progress_total > 0:
+                                    percent = int((processed / progress_total) * 100)
+                                    elapsed = time.time() - start_time
+                                    if elapsed > 0:
+                                        speed = processed / elapsed
+                                        remaining = (progress_total - processed) / speed if speed > 0 else 0
+                                        eta_str = self._format_time(remaining)
+                                        speed_str = f"{self._format_size(speed)}/s"
+                                    else:
+                                        eta_str = "--:--"
+                                        speed_str = "-- MB/s"
+                                    bar_width = 30
+                                    filled = int(bar_width * processed / progress_total)
+                                    bar = '█' * filled + '░' * (bar_width - filled)
+                                    print(f"\r🗜️  [{bar}] {percent}% {self._format_size(processed)}/{self._format_size(progress_total)} ETA: {eta_str} @ {speed_str}", end='', flush=True)
+                                else:
+                                    print(f"\r🗜️  Processed: {self._format_size(processed)}", end='', flush=True)
                                 db_file.flush()
                 print()  # New line after decompression
                     

@@ -8,6 +8,9 @@ Licensed under GPL-2.0
 # Repository name that identifies this FUSE filesystem to portage
 REPO_NAME = "portage-pip-fuse"
 
+# Default repository location (mountpoint)
+REPO_LOCATION = "/var/db/repos/pypi"
+
 # Default cache directory
 DEFAULT_CACHE_DIR = "/tmp/portage-pip-fuse-cache"
 
