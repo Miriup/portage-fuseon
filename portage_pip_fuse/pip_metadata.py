@@ -1267,7 +1267,65 @@ class EbuildDataExtractor:
             optional_depend[use_flag].append(gentoo_dep)
         
         return sorted(list(iuse_flags)), optional_depend
-    
+
+    def _translate_pypi_version(self, pypi_version: str) -> str:
+        """
+        Translate PyPI version string to Gentoo format.
+
+        Converts PEP 440 pre-release and post-release markers:
+        - a/alpha -> _alpha (e.g., 2.0a0 -> 2.0_alpha0)
+        - b/beta -> _beta (e.g., 1.0b1 -> 1.0_beta1)
+        - rc/c -> _rc (e.g., 3.0rc1 -> 3.0_rc1)
+        - .post -> _p (e.g., 1.0.post1 -> 1.0_p1)
+        - .dev -> _pre (e.g., 1.0.dev1 -> 1.0_pre1)
+
+        Args:
+            pypi_version: Version string in PyPI/PEP 440 format
+
+        Returns:
+            Version string in Gentoo format
+
+        Examples:
+            >>> extractor = EbuildDataExtractor()
+            >>> extractor._translate_pypi_version('2.0a0')
+            '2.0_alpha0'
+            >>> extractor._translate_pypi_version('1.0b1')
+            '1.0_beta1'
+            >>> extractor._translate_pypi_version('3.0rc1')
+            '3.0_rc1'
+            >>> extractor._translate_pypi_version('1.0c1')
+            '1.0_rc1'
+            >>> extractor._translate_pypi_version('1.0.post1')
+            '1.0_p1'
+            >>> extractor._translate_pypi_version('1.2.3')
+            '1.2.3'
+        """
+        import re
+        version = pypi_version
+
+        # Handle pre-release markers (must check longer patterns first)
+        # alpha/a followed by a number
+        version = re.sub(r'\.?alpha(\d+)', r'_alpha\1', version)
+        version = re.sub(r'\.?a(\d+)', r'_alpha\1', version)
+
+        # beta/b followed by a number
+        version = re.sub(r'\.?beta(\d+)', r'_beta\1', version)
+        version = re.sub(r'\.?b(\d+)', r'_beta\1', version)
+
+        # rc/c followed by a number (release candidate)
+        # Must check 'rc' first before 'c' to avoid partial match
+        version = re.sub(r'\.?rc(\d+)', r'_rc\1', version)
+        # Only match standalone 'c' not preceded by 'r' (use negative lookbehind)
+        version = re.sub(r'(?<!r)\.?c(\d+)', r'_rc\1', version)
+
+        # post release
+        version = re.sub(r'\.post(\d+)', r'_p\1', version)
+
+        # dev release
+        version = re.sub(r'\.dev(\d+)', r'_pre\1', version)
+
+        return version
+
     def _format_gentoo_dependency(self, gentoo_name: str, specifiers) -> str:
         """
         Format a Gentoo dependency string with version specifiers.
@@ -1307,12 +1365,12 @@ class EbuildDataExtractor:
         """
         if not specifiers:
             return f"dev-python/{gentoo_name}"
-        
+
         # Convert PyPI version specifiers to Gentoo format
         dep_parts = []
         for spec in specifiers:
             operator = spec.operator
-            version = spec.version
+            version = self._translate_pypi_version(spec.version)
             
             # Translate operators to Gentoo format
             if operator == '==':
