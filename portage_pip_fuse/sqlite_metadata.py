@@ -535,7 +535,8 @@ class SQLiteMetadataBackend:
             return False
             
         try:
-            self._conn = sqlite3.connect(self.db_path)
+            # check_same_thread=False allows connection to be used from FUSE threads
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row  # Enable dict-like access
             logger.info("Connected to SQLite database")
             return True
@@ -722,7 +723,11 @@ class SQLiteMetadataBackend:
     def close(self):
         """Close database connection."""
         if self._conn:
-            self._conn.close()
+            try:
+                self._conn.close()
+            except sqlite3.ProgrammingError:
+                # May happen if called from different thread, connection already invalid
+                pass
             self._conn = None
             
     def __enter__(self):
