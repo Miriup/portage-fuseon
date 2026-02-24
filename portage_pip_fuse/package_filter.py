@@ -21,6 +21,9 @@ from xml.etree import ElementTree as ET
 from packaging.requirements import Requirement
 from packaging.markers import Marker, UndefinedEnvironmentName
 
+from portage_pip_fuse.constants import HTTP_TIMEOUT
+from portage_pip_fuse.interrupt import check_interrupt
+
 logger = logging.getLogger(__name__)
 
 
@@ -257,18 +260,21 @@ class FilterDependencyTree(FilterBase):
             
         # Parse dependencies
         requires_dist = metadata.get('info', {}).get('requires_dist', []) or []
-        
+
         for req_str in requires_dist:
+            # Check for interrupts between dependency iterations
+            check_interrupt()
+
             try:
                 req = Requirement(req_str)
-                
+
                 # Normalize the dependency name for cycle detection
                 dep_name = req.name.lower().replace('_', '-').replace('.', '-')
-                
+
                 # Skip if already visited (prevent cycles)
                 if dep_name in visited:
                     continue
-                
+
                 # When include_all_extras is True, include ALL dependencies regardless of markers
                 if include_all_extras:
                     # Include the dependency (it might be conditional on an extra)
@@ -280,7 +286,9 @@ class FilterDependencyTree(FilterBase):
                     self._resolve_package_dependencies(
                         req.name, depth + 1, visited, include_all_extras
                     )
-                    
+
+            except InterruptedError:
+                raise  # Re-raise interrupts
             except Exception as e:
                 logger.debug(f"Error parsing requirement '{req_str}': {e}")
                 
@@ -384,7 +392,7 @@ class FilterRecent(FilterBase):
         
         try:
             # Fetch RSS feed
-            response = requests.get('https://pypi.org/rss/updates.xml', timeout=10)
+            response = requests.get('https://pypi.org/rss/updates.xml', timeout=HTTP_TIMEOUT)
             if response.status_code != 200:
                 logger.warning(f"Failed to fetch RSS feed: {response.status_code}")
                 return packages
@@ -448,7 +456,7 @@ class FilterNewest(FilterBase):
         
         try:
             # Fetch RSS feed for new packages
-            response = requests.get('https://pypi.org/rss/packages.xml', timeout=10)
+            response = requests.get('https://pypi.org/rss/packages.xml', timeout=HTTP_TIMEOUT)
             if response.status_code != 200:
                 logger.warning(f"Failed to fetch RSS feed: {response.status_code}")
                 return packages
@@ -646,7 +654,7 @@ class FilterAll(FilterBase):
         
         try:
             import re
-            response = requests.get('https://pypi.org/simple/', timeout=30)
+            response = requests.get('https://pypi.org/simple/', timeout=HTTP_TIMEOUT)
             if response.status_code == 200:
                 # Parse package names from HTML
                 matches = re.findall(r'<a href="/simple/([^/]+)/">', response.text)
@@ -808,7 +816,7 @@ class FilterSourceDistribution(FilterBase):
         packages_to_check = set()
         
         # Use recent packages as a practical base set
-        response = requests.get('https://pypi.org/rss/updates.xml', timeout=30)
+        response = requests.get('https://pypi.org/rss/updates.xml', timeout=HTTP_TIMEOUT)
         response.raise_for_status()
         
         root = ET.fromstring(response.content)

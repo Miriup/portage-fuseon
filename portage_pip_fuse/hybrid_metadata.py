@@ -26,6 +26,7 @@ except ImportError:
 
 from portage_pip_fuse.sqlite_metadata import SQLiteMetadataBackend
 from portage_pip_fuse.pip_metadata import PyPIMetadataExtractor
+from portage_pip_fuse.interrupt import check_interrupt
 
 logger = logging.getLogger(__name__)
 
@@ -290,9 +291,14 @@ class HybridMetadataExtractor:
         try:
             versions = self.sqlite_backend.get_package_versions(package_name)
             for version in versions:
+                # Check for interrupts between version iterations
+                check_interrupt()
+
                 version_releases = self.sqlite_backend.get_package_releases(package_name, version)
                 if version_releases:
                     releases[version] = version_releases
+        except InterruptedError:
+            raise  # Re-raise interrupts
         except Exception as e:
             logger.debug(f"Error getting releases for {package_name}: {e}")
         

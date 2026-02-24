@@ -24,6 +24,7 @@ from typing import Optional, Dict, List, Set, Tuple
 from fuse import FUSE, FuseOSError, Operations
 
 from .constants import REPO_NAME
+from .interrupt import InterruptChecker, check_interrupt
 from .prefetcher import create_prefetched_translator
 from .pip_metadata import PyPIMetadataExtractor, EbuildDataExtractor
 from .hybrid_metadata import HybridMetadataExtractor
@@ -415,10 +416,13 @@ cache-formats = md5-dict
             
             gentoo_versions = []
             for pypi_ver in releases:
+                # Check for interrupts between version iterations
+                check_interrupt()
+
                 # Skip versions with no files (yanked or empty releases)
                 if not releases[pypi_ver]:
                     continue
-                    
+
                 gentoo_ver = self._translate_version(pypi_ver)
                 if gentoo_ver:
                     # Check if this version would have valid PYTHON_COMPAT
@@ -687,86 +691,106 @@ cache-formats = md5-dict
             
     def readdir(self, path, fh):
         """Read directory contents."""
+        # Clear interrupt flag at start of operation
+        InterruptChecker.clear()
+
         parsed = self._parse_path(path)
         entries = ['.', '..']
-        
-        if parsed['type'] == 'root':
-            # Root directory - show main overlay structure
-            entries.extend(['dev-python', 'profiles', 'metadata', 'eclass'])
-            
-        elif parsed['type'] == 'profiles':
-            entries.append('repo_name')
-            
-        elif parsed['type'] == 'metadata':
-            entries.append('layout.conf')
-            
-        elif parsed['type'] == 'eclass':
-            # Empty for now - could add eclasses later
-            pass
-            
-        elif parsed['type'] == 'category' and parsed['category'] == 'dev-python':
-            # Use the configured filter to get packages
-            try:
-                import time
-                start_time = time.time()
-                
-                logger.info(f"Listing packages using filter: {self.package_filter.get_description()}")
-                
-                # Get PyPI packages from the filter
-                pypi_packages = self.package_filter.get_packages()
-                
-                # Convert PyPI names to Gentoo names
-                # For packages without existing Gentoo names, use the PyPI name directly
-                gentoo_packages = []
-                for pypi_name in pypi_packages:
-                    gentoo_name = self.name_translator.pypi_to_gentoo(pypi_name)
-                    if gentoo_name:
-                        gentoo_packages.append(gentoo_name)
-                    else:
-                        # Use PyPI name directly (it will be translated back when accessed)
-                        # This allows us to provide PyPI packages that don't exist in Gentoo yet
-                        gentoo_packages.append(pypi_name.lower().replace('_', '-').replace('.', '-'))
-                
-                entries.extend(sorted(gentoo_packages))
-                
-                elapsed = time.time() - start_time
-                logger.info(f"Listed {len(gentoo_packages)} packages in {elapsed:.2f} seconds")
-                
-            except Exception as e:
-                logger.error(f"Error listing packages: {e}")
-                # Fallback to empty list on error
-                logger.warning("Package listing failed, returning empty directory")
-            
-        elif parsed['type'] == 'package':
-            # List versions and files for a package
-            gentoo_name = parsed['package']
-            pypi_name = self._gentoo_to_pypi(gentoo_name)
-            
-            if pypi_name:
+
+        try:
+            if parsed['type'] == 'root':
+                # Root directory - show main overlay structure
+                entries.extend(['dev-python', 'profiles', 'metadata', 'eclass'])
+
+            elif parsed['type'] == 'profiles':
+                entries.append('repo_name')
+
+            elif parsed['type'] == 'metadata':
+                entries.append('layout.conf')
+
+            elif parsed['type'] == 'eclass':
+                # Empty for now - could add eclasses later
+                pass
+
+            elif parsed['type'] == 'category' and parsed['category'] == 'dev-python':
+                # Use the configured filter to get packages
                 try:
-                    versions = self._get_package_versions(pypi_name)
-                    if versions:  # Only list files if package exists on PyPI
-                        # Add ebuild files for each version
-                        for version in versions:
-                            entries.append(f"{gentoo_name}-{version}.ebuild")
-                        
-                        # Add metadata files
-                        entries.extend(['metadata.xml', 'Manifest'])
-                    else:
-                        logger.debug(f"No versions found for {pypi_name}, not listing files")
+                    import time
+                    start_time = time.time()
+
+                    logger.info(f"Listing packages using filter: {self.package_filter.get_description()}")
+
+                    # Get PyPI packages from the filter
+                    pypi_packages = self.package_filter.get_packages()
+
+                    # Convert PyPI names to Gentoo names
+                    # For packages without existing Gentoo names, use the PyPI name directly
+                    gentoo_packages = []
+                    for pypi_name in pypi_packages:
+                        # Check for interrupts during conversion
+                        check_interrupt()
+
+                        gentoo_name = self.name_translator.pypi_to_gentoo(pypi_name)
+                        if gentoo_name:
+                            gentoo_packages.append(gentoo_name)
+                        else:
+                            # Use PyPI name directly (it will be translated back when accessed)
+                            # This allows us to provide PyPI packages that don't exist in Gentoo yet
+                            gentoo_packages.append(pypi_name.lower().replace('_', '-').replace('.', '-'))
+
+                    entries.extend(sorted(gentoo_packages))
+
+                    elapsed = time.time() - start_time
+                    logger.info(f"Listed {len(gentoo_packages)} packages in {elapsed:.2f} seconds")
+
+                except InterruptedError:
+                    logger.info("Package listing interrupted")
+                    # Return minimal result on interrupt
                 except Exception as e:
-                    logger.error(f"Error listing files for {gentoo_name}: {e}")
-        
+                    logger.error(f"Error listing packages: {e}")
+                    # Fallback to empty list on error
+                    logger.warning("Package listing failed, returning empty directory")
+
+            elif parsed['type'] == 'package':
+                # List versions and files for a package
+                gentoo_name = parsed['package']
+                pypi_name = self._gentoo_to_pypi(gentoo_name)
+
+                if pypi_name:
+                    try:
+                        versions = self._get_package_versions(pypi_name)
+                        if versions:  # Only list files if package exists on PyPI
+                            # Add ebuild files for each version
+                            for version in versions:
+                                entries.append(f"{gentoo_name}-{version}.ebuild")
+
+                            # Add metadata files
+                            entries.extend(['metadata.xml', 'Manifest'])
+                        else:
+                            logger.debug(f"No versions found for {pypi_name}, not listing files")
+                    except InterruptedError:
+                        logger.info(f"Version listing interrupted for {pypi_name}")
+                        # Return minimal result on interrupt
+                    except Exception as e:
+                        logger.error(f"Error listing files for {gentoo_name}: {e}")
+
+        except InterruptedError:
+            logger.info(f"readdir interrupted for {path}")
+            # Return minimal result on interrupt
+
         return entries
         
     def read(self, path, length, offset, fh):
         """Read file contents."""
+        # Clear interrupt flag at start of operation
+        InterruptChecker.clear()
+
         # Check static files first
         if path in self.static_files:
             content = self.static_files[path]
             return content[offset:offset + length]
-        
-        # Check static files  
+
+        # Check static files
         parsed = self._parse_path(path)
         if parsed['type'] == 'profiles_file' and parsed['filename'] == 'repo_name':
             content = b"portage-pip-fuse\n"
@@ -774,21 +798,26 @@ cache-formats = md5-dict
         elif parsed['type'] == 'metadata_file' and parsed['filename'] == 'layout.conf':
             content = self._generate_layout_conf().encode('utf-8')
             return content[offset:offset + length]
-        
-        # Try cache
-        content = self._get_cached_content(path)
-        if content is None:
-            # Generate dynamic content
-            content = self._generate_content(path)
-            if content is not None:
-                if isinstance(content, str):
-                    content = content.encode('utf-8')
-                self._cache_content(path, content)
-        
-        if content is None:
-            raise FuseOSError(errno.ENOENT)
-            
-        return content[offset:offset + length]
+
+        try:
+            # Try cache
+            content = self._get_cached_content(path)
+            if content is None:
+                # Generate dynamic content
+                content = self._generate_content(path)
+                if content is not None:
+                    if isinstance(content, str):
+                        content = content.encode('utf-8')
+                    self._cache_content(path, content)
+
+            if content is None:
+                raise FuseOSError(errno.ENOENT)
+
+            return content[offset:offset + length]
+
+        except InterruptedError:
+            logger.info(f"read interrupted for {path}")
+            raise FuseOSError(errno.EINTR)
         
     def open(self, path, flags):
         """Open a file."""
@@ -982,17 +1011,22 @@ cache-formats = md5-dict
             return None
             
         manifest_lines = []
-        
+
         # Get all versions and generate DIST entries
         for pypi_version in metadata.get('all_versions', []):
+            # Check for interrupts between version iterations
+            check_interrupt()
+
             gentoo_version = self._translate_version(pypi_version)
             if not gentoo_version:
                 continue
-                
+
             try:
                 version_info = self.pypi_extractor.get_complete_package_info(pypi_name, pypi_version)
                 if version_info and 'manifest_entry' in version_info:
                     manifest_lines.append(version_info['manifest_entry'])
+            except InterruptedError:
+                raise  # Re-raise interrupts
             except Exception as e:
                 logger.warning(f"Failed to get manifest entry for {pypi_name} {pypi_version}: {e}")
                 

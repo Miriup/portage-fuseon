@@ -33,6 +33,11 @@ DEFAULT_CACHE_TTL = 3600
 # Maximum depth for dependency resolution
 DEFAULT_MAX_DEPENDENCY_DEPTH = 10
 
+# HTTP request timeouts (connect, read) in seconds
+HTTP_CONNECT_TIMEOUT = 5
+HTTP_READ_TIMEOUT = 30
+HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)
+
 
 def find_cache_dir(explicit_dir: Optional[str] = None) -> Path:
     """

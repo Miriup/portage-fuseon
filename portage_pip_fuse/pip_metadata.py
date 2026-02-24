@@ -38,7 +38,7 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-from portage_pip_fuse.constants import find_cache_dir
+from portage_pip_fuse.constants import find_cache_dir, HTTP_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +287,7 @@ class PyPIMetadataExtractor:
             else:
                 url = f"https://pypi.org/pypi/{package_name}/json"
             
-            response = requests.get(url, timeout=self.session_timeout)
+            response = requests.get(url, timeout=HTTP_TIMEOUT)
             
             if response.status_code == 200:
                 data = response.json()
