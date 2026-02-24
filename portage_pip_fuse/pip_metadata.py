@@ -1393,6 +1393,9 @@ class EbuildDataExtractor:
             
             # Translate operators to Gentoo format
             if operator == '==':
+                # Handle wildcard versions: PyPI ==23.* -> Gentoo =pkg-23*
+                if version.endswith('.*'):
+                    version = version[:-2] + '*'  # Remove .* and add *
                 dep_parts.append(f"=dev-python/{gentoo_name}-{version}")
             elif operator == '>=':
                 dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
@@ -1403,7 +1406,11 @@ class EbuildDataExtractor:
             elif operator == '<':
                 dep_parts.append(f"<dev-python/{gentoo_name}-{version}")
             elif operator == '!=':
-                dep_parts.append(f"!dev-python/{gentoo_name}-{version}")
+                # Handle wildcard versions: PyPI !=9.2.* -> Gentoo !=pkg-9.2*
+                # Note: Gentoo uses != for versioned blocks, ! is only for unversioned
+                if version.endswith('.*'):
+                    version = version[:-2] + '*'  # Remove .* and add *
+                dep_parts.append(f"!=dev-python/{gentoo_name}-{version}")
             elif operator == '~=':
                 # Compatible release per PEP 440: ~=1.4 means >=1.4, ==1.*
                 # ~=1.4.5 means >=1.4.5, ==1.4.*

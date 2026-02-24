@@ -488,9 +488,12 @@ To unmount:
     # Resolve cache directory
     cache_dir = find_cache_dir(args.cache_dir)
 
-    # Build active filter list
+    # Build active filter list (package filters only)
     active_filters = set(FilterRegistry.get_default_filters())
-    
+
+    # Track disabled filters separately (for version filters)
+    disabled_filters = set(args.no_filter) if args.no_filter else set()
+
     # Add explicitly requested filters
     if args.filter:
         active_filters.update(args.filter)
@@ -556,6 +559,7 @@ To unmount:
     # Build filter configuration dictionary
     filter_config = {
         'active_filters': list(active_filters),
+        'disabled_filters': list(disabled_filters),
         'deps_for': args.deps_for or [],
         'use_flags': use_flags,
         'days': args.filter_days,

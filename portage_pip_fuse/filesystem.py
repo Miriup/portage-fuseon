@@ -142,18 +142,13 @@ class PortagePipFS(Operations):
         
     def _create_version_filter(self, filter_config: Dict) -> Optional[VersionFilterChain]:
         """Create version filter chain based on configuration."""
-        # Check active_filters from CLI (respects --no-filter)
-        active_filters = set(filter_config.get('active_filters', []))
+        # Check disabled_filters from CLI (respects --no-filter)
+        disabled_filters = set(filter_config.get('disabled_filters', []))
 
-        # Default version filters, but only if they're in active_filters (or active_filters is empty)
+        # Default version filters, excluding any that were explicitly disabled
         default_version_filters = ['source-dist', 'python-compat']
-        if active_filters:
-            # Only include version filters that are in active_filters
-            version_filters = [f for f in default_version_filters if f in active_filters]
-        else:
-            # No active filters specified - use defaults
-            version_filters = default_version_filters
-        
+        version_filters = [f for f in default_version_filters if f not in disabled_filters]
+
         if not version_filters:
             return None
             
