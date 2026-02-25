@@ -23,8 +23,34 @@ from portage_pip_fuse.filesystem import mount_filesystem, PortagePipFS
 from portage_pip_fuse.package_filter import FilterRegistry
 from portage_pip_fuse.sqlite_metadata import SQLiteMetadataBackend
 from portage_pip_fuse.constants import REPO_NAME, REPO_LOCATION, find_cache_dir
-from portage_pip_fuse.name_translator import pypi_to_gentoo
+from portage_pip_fuse.prefetcher import create_prefetched_translator
 from portage_pip_fuse.pip_metadata import EbuildDataExtractor
+
+# Lazy-initialized translator with Gentoo repository mappings
+_prefetched_translator = None
+
+
+def _get_translator():
+    """
+    Get the prefetched name translator, initializing it on first use.
+
+    This lazy initialization avoids slow startup for commands that don't
+    need name translation.
+    """
+    global _prefetched_translator
+    if _prefetched_translator is None:
+        _prefetched_translator = create_prefetched_translator()
+    return _prefetched_translator
+
+
+def pypi_to_gentoo(pypi_name: str) -> str:
+    """
+    Translate PyPI package name to Gentoo package name.
+
+    Uses the prefetched translator which has mappings from actual Gentoo
+    repositories (e.g., psycopg2 -> psycopg).
+    """
+    return _get_translator().pypi_to_gentoo(pypi_name)
 
 # Try to import pip's packaging library for requirement parsing
 try:
