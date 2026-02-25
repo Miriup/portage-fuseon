@@ -788,8 +788,8 @@ Then runs: emerge @{project}-dependencies
                 return 1
 
             if not project_version:
-                print("Warning: Could not detect project version, using '0'")
-                project_version = '0'
+                print("Warning: Could not detect project version, using '9999'")
+                project_version = '9999'
 
             # Translate version to Gentoo format
             gentoo_version = _translate_pypi_version(project_version)
