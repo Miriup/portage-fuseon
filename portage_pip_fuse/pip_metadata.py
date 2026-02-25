@@ -1359,7 +1359,7 @@ class EbuildDataExtractor:
 
             if len(unique_deps) == 1:
                 # All versions have the same dependency - simple case
-                formatted_deps.append(list(unique_deps)[0])
+                formatted_deps.append(self._add_python_usedep(list(unique_deps)[0]))
             else:
                 # Different versions have different dependencies - use conditionals
                 # Group versions by their dependency to minimize output
@@ -1371,10 +1371,11 @@ class EbuildDataExtractor:
 
                 for dep, versions in dep_to_versions.items():
                     # Generate individual conditionals for each Python version
-                    # e.g., "3.11" -> "python_targets_python3_11? ( dep )"
+                    # e.g., "3.11" -> "python_targets_python3_11? ( dep[${PYTHON_USEDEP}] )"
+                    dep_with_usedep = self._add_python_usedep(dep)
                     for v in sorted(versions):
                         use_flag = f"python_targets_python{v.replace('.', '_')}"
-                        formatted_deps.append(f"{use_flag}? ( {dep} )")
+                        formatted_deps.append(f"{use_flag}? ( {dep_with_usedep} )")
 
         return formatted_deps
         
@@ -1449,7 +1450,10 @@ class EbuildDataExtractor:
                 gentoo_dep = self._format_gentoo_dependency(gentoo_name, specifiers)
             else:
                 gentoo_dep = f"dev-python/{gentoo_name}"
-            
+
+            # Add PYTHON_USEDEP to ensure deps are built for same Python targets
+            gentoo_dep = self._add_python_usedep(gentoo_dep)
+
             # Add to collections
             iuse_flags.add(use_flag)
             if use_flag not in optional_depend:
@@ -1457,6 +1461,41 @@ class EbuildDataExtractor:
             optional_depend[use_flag].append(gentoo_dep)
         
         return sorted(list(iuse_flags)), optional_depend
+
+    def _add_python_usedep(self, dep: str) -> str:
+        """
+        Add ${PYTHON_USEDEP} to a Gentoo dependency string.
+
+        Handles both simple atoms and || ( ) groups by adding the USEDEP
+        to each individual atom.
+
+        Args:
+            dep: Gentoo dependency string
+
+        Returns:
+            Dependency string with ${PYTHON_USEDEP} added to each atom
+
+        Examples:
+            >>> extractor = EbuildDataExtractor()
+            >>> extractor._add_python_usedep('>=dev-python/requests-2.0')
+            '>=dev-python/requests-2.0[${PYTHON_USEDEP}]'
+            >>> extractor._add_python_usedep('|| ( =dev-python/foo-1.0 =dev-python/foo-1.0.0 )')
+            '|| ( =dev-python/foo-1.0[${PYTHON_USEDEP}] =dev-python/foo-1.0.0[${PYTHON_USEDEP}] )'
+            >>> extractor._add_python_usedep('dev-python/simple')
+            'dev-python/simple[${PYTHON_USEDEP}]'
+        """
+        usedep = '[${PYTHON_USEDEP}]'
+
+        # Handle || ( ) groups - add USEDEP to each atom inside
+        if dep.startswith('|| ('):
+            # Extract atoms from inside || ( ... )
+            inner = dep[4:-1].strip()  # Remove "|| (" and ")"
+            atoms = inner.split()
+            atoms_with_usedep = [f"{atom}{usedep}" for atom in atoms]
+            return f"|| ( {' '.join(atoms_with_usedep)} )"
+
+        # Simple atom - just append USEDEP
+        return f"{dep}{usedep}"
 
     def _translate_pypi_version(self, pypi_version: str) -> str:
         """
