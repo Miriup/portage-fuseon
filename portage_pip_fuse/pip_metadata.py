@@ -1070,38 +1070,17 @@ class EbuildDataExtractor:
         # Remove duplicates and sort
         result = sorted(list(set(compat_versions)))
 
-        # If no valid versions found, fall back to system PYTHON_TARGETS
+        # If no valid versions found, fall back to all valid implementations
         # PyPI is a Python archive - packages without explicit requirements
         # should still work with current Python versions
         if not result:
-            # Helper to filter out free-threading variants (e.g., python3_13t)
+            # When compatibility is unknown, assume all current Python versions work
+            # PyPI packages without requires_python typically support all modern versions
+            # PYTHON_COMPAT declares what the *package* supports, not what the *user* wants
             def standard_impls(impls):
                 return sorted([i for i in impls if i.startswith('python3_') and not i.endswith('t')])
-
-            try:
-                import subprocess
-                proc = subprocess.run(['portageq', 'envvar', 'PYTHON_TARGETS'],
-                                     capture_output=True, text=True, check=True)
-                system_targets = proc.stdout.strip().split()
-                # Handle PYTHON_TARGETS=* (wildcard meaning all)
-                if system_targets == ['*']:
-                    result = standard_impls(valid_impls)
-                    logger.debug(f"PYTHON_TARGETS=*, using all valid impls: {result}")
-                else:
-                    for target in system_targets:
-                        if target.startswith('python3_') and target in valid_impls:
-                            result.append(target)
-                    result = sorted(result)
-                    logger.debug(f"No valid Python versions from metadata, using system targets: {result}")
-            except Exception:
-                # Ultimate fallback - use all valid Python 3 implementations
-                result = standard_impls(valid_impls)
-                logger.debug(f"Fallback to all valid impls: {result}")
-
-            # If still empty after trying PYTHON_TARGETS, use all valid impls
-            if not result:
-                result = standard_impls(valid_impls)
-                logger.debug(f"Empty PYTHON_TARGETS result, using all valid impls: {result}")
+            result = standard_impls(valid_impls)
+            logger.debug(f"No valid Python versions from metadata, using all valid impls: {result}")
 
         # Cache the result
         self._compat_cache[cache_key] = result
