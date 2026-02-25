@@ -638,11 +638,18 @@ class PyPIMetadataExtractor:
         if not requires_python:
             return []
 
-        # Known Python 3 versions to check against (kept reasonably current)
-        # These are the versions that Gentoo's python-utils-r1.eclass supports
-        all_python_versions = [
-            '3.8', '3.9', '3.10', '3.11', '3.12', '3.13'
-        ]
+        # Get Python versions dynamically from _PYTHON_ALL_IMPLS
+        # This ensures we always check against current Gentoo-supported versions
+        valid_impls = EbuildDataExtractor._get_valid_python_impls()
+        all_python_versions = []
+        for impl in sorted(valid_impls):
+            if impl.startswith('python3_'):
+                minor = impl[8:]  # Remove 'python3_'
+                if minor.isdigit():  # Skip free-threading variants like '13t'
+                    all_python_versions.append(f'3.{minor}')
+        # Fallback if we couldn't get impls
+        if not all_python_versions:
+            all_python_versions = ['3.11', '3.12', '3.13', '3.14']
 
         if HAS_PACKAGING:
             try:
@@ -794,6 +801,7 @@ class PyPIMetadataExtractor:
         classifier_versions = self.extract_python_versions(metadata.get('classifiers', []))
 
         # Parse requires_python specifier if available
+        # Note: get_package_metadata stores this as 'python_requires'
         requires_python = metadata.get('python_requires', '')
         specifier_versions = self.parse_requires_python(requires_python) if requires_python else []
 
@@ -979,23 +987,36 @@ class EbuildDataExtractor:
             # Get system PYTHON_TARGETS as fallback
             try:
                 import subprocess
-                result = subprocess.run(['portageq', 'envvar', 'PYTHON_TARGETS'], 
+                result = subprocess.run(['portageq', 'envvar', 'PYTHON_TARGETS'],
                                       capture_output=True, text=True, check=True)
                 system_targets = result.stdout.strip().split()
-                # Convert to standard format (e.g., python3_11 -> 3.11)
-                fallback_versions = []
-                for target in system_targets:
-                    if target.startswith('python3_'):
-                        minor = target[8:]  # Remove 'python3_'
-                        fallback_versions.append(f'3.{minor}')
-                if fallback_versions:
-                    python_versions = fallback_versions
+                # Handle PYTHON_TARGETS=* (wildcard meaning all)
+                if system_targets == ['*']:
+                    # Use versions from _PYTHON_ALL_IMPLS
+                    valid_impls = self._get_valid_python_impls()
+                    fallback_versions = []
+                    for impl in valid_impls:
+                        if impl.startswith('python3_'):
+                            minor = impl[8:]  # Remove 'python3_'
+                            if minor.endswith('t'):  # Skip free-threading variants
+                                continue
+                            fallback_versions.append(f'3.{minor}')
+                    python_versions = fallback_versions if fallback_versions else ['3.11', '3.12', '3.13']
                 else:
-                    # Ultimate fallback
-                    python_versions = ['3.10', '3.11', '3.12']
+                    # Convert to standard format (e.g., python3_11 -> 3.11)
+                    fallback_versions = []
+                    for target in system_targets:
+                        if target.startswith('python3_'):
+                            minor = target[8:]  # Remove 'python3_'
+                            fallback_versions.append(f'3.{minor}')
+                    if fallback_versions:
+                        python_versions = fallback_versions
+                    else:
+                        # Ultimate fallback
+                        python_versions = ['3.11', '3.12', '3.13']
             except Exception:
                 # Ultimate fallback if portageq fails
-                python_versions = ['3.10', '3.11', '3.12']
+                python_versions = ['3.11', '3.12', '3.13']
         
         # Get valid implementations from eclass
         valid_impls = self._get_valid_python_impls()
@@ -1053,20 +1074,34 @@ class EbuildDataExtractor:
         # PyPI is a Python archive - packages without explicit requirements
         # should still work with current Python versions
         if not result:
+            # Helper to filter out free-threading variants (e.g., python3_13t)
+            def standard_impls(impls):
+                return sorted([i for i in impls if i.startswith('python3_') and not i.endswith('t')])
+
             try:
                 import subprocess
                 proc = subprocess.run(['portageq', 'envvar', 'PYTHON_TARGETS'],
                                      capture_output=True, text=True, check=True)
                 system_targets = proc.stdout.strip().split()
-                for target in system_targets:
-                    if target.startswith('python3_') and target in valid_impls:
-                        result.append(target)
-                result = sorted(result)
-                logger.debug(f"No valid Python versions from metadata, using system targets: {result}")
+                # Handle PYTHON_TARGETS=* (wildcard meaning all)
+                if system_targets == ['*']:
+                    result = standard_impls(valid_impls)
+                    logger.debug(f"PYTHON_TARGETS=*, using all valid impls: {result}")
+                else:
+                    for target in system_targets:
+                        if target.startswith('python3_') and target in valid_impls:
+                            result.append(target)
+                    result = sorted(result)
+                    logger.debug(f"No valid Python versions from metadata, using system targets: {result}")
             except Exception:
                 # Ultimate fallback - use all valid Python 3 implementations
-                result = sorted([impl for impl in valid_impls if impl.startswith('python3_')])
+                result = standard_impls(valid_impls)
                 logger.debug(f"Fallback to all valid impls: {result}")
+
+            # If still empty after trying PYTHON_TARGETS, use all valid impls
+            if not result:
+                result = standard_impls(valid_impls)
+                logger.debug(f"Empty PYTHON_TARGETS result, using all valid impls: {result}")
 
         # Cache the result
         self._compat_cache[cache_key] = result
@@ -1324,12 +1359,14 @@ class EbuildDataExtractor:
 
         # Handle pre-release markers (must check longer patterns first)
         # alpha/a followed by a number
+        # Use negative lookbehind to avoid matching 'a' in already-translated '_alpha'
         version = re.sub(r'\.?alpha(\d+)', r'_alpha\1', version)
-        version = re.sub(r'\.?a(\d+)', r'_alpha\1', version)
+        version = re.sub(r'(?<![a-z])\.?a(\d+)', r'_alpha\1', version)
 
         # beta/b followed by a number
+        # Use negative lookbehind to avoid matching 'b' in already-translated '_beta'
         version = re.sub(r'\.?beta(\d+)', r'_beta\1', version)
-        version = re.sub(r'\.?b(\d+)', r'_beta\1', version)
+        version = re.sub(r'(?<![a-z])\.?b(\d+)', r'_beta\1', version)
 
         # rc/c followed by a number (release candidate)
         # Must check 'rc' first before 'c' to avoid partial match

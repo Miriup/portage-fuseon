@@ -107,10 +107,11 @@ def _translate_pypi_version(pypi_version: str) -> str:
     version = pypi_version
 
     # Handle pre-release markers (must check longer patterns first)
+    # Use negative lookbehind to avoid matching 'a'/'b' in already-translated '_alpha'/'_beta'
     version = re.sub(r'\.?alpha(\d+)', r'_alpha\1', version)
-    version = re.sub(r'\.?a(\d+)', r'_alpha\1', version)
+    version = re.sub(r'(?<![a-z])\.?a(\d+)', r'_alpha\1', version)
     version = re.sub(r'\.?beta(\d+)', r'_beta\1', version)
-    version = re.sub(r'\.?b(\d+)', r'_beta\1', version)
+    version = re.sub(r'(?<![a-z])\.?b(\d+)', r'_beta\1', version)
     version = re.sub(r'\.?rc(\d+)', r'_rc\1', version)
     version = re.sub(r'(?<!r)\.?c(\d+)', r'_rc\1', version)
     version = re.sub(r'\.post(\d+)', r'_p\1', version)
