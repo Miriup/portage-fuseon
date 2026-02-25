@@ -1187,7 +1187,8 @@ class EbuildDataExtractor:
             # Unknown license - use all-rights-reserved per Gentoo policy
             return 'all-rights-reserved'
 
-    def _get_supported_python_versions(self) -> List[str]:
+    @classmethod
+    def _get_supported_python_versions(cls) -> List[str]:
         """
         Get supported Python versions as version strings (e.g., "3.11", "3.12").
 
@@ -1195,12 +1196,11 @@ class EbuildDataExtractor:
             List of Python version strings supported by the system
 
         Examples:
-            >>> extractor = EbuildDataExtractor()
-            >>> versions = extractor._get_supported_python_versions()
+            >>> versions = EbuildDataExtractor._get_supported_python_versions()
             >>> all(v.startswith('3.') for v in versions)
             True
         """
-        valid_impls = self._get_valid_python_impls()
+        valid_impls = cls._get_valid_python_impls()
         versions = []
         for impl in sorted(valid_impls):
             if impl.startswith('python3_'):
@@ -1214,7 +1214,8 @@ class EbuildDataExtractor:
                     continue
         return versions
 
-    def _evaluate_marker_for_python(self, marker, python_version: str) -> bool:
+    @staticmethod
+    def _evaluate_marker_for_python(marker, python_version: str) -> bool:
         """
         Evaluate a PEP 508 environment marker for a specific Python version.
 
