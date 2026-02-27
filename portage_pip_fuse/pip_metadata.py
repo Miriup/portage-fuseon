@@ -422,22 +422,26 @@ class PyPIMetadataExtractor:
         
         return None
     
-    def generate_manifest_entry(self, download_info: Dict[str, Any], 
+    def generate_manifest_entry(self, download_info: Dict[str, Any],
                                wanted_hashes: Optional[List[str]] = None) -> str:
         """
         Generate a Gentoo Manifest DIST entry from download information.
-        
-        Uses the hash algorithms that PyPI actually provides: md5, sha256, blake2b_256.
-        Note that modern Gentoo packages use BLAKE2B and SHA512, but PyPI doesn't
-        provide SHA512, so we use what's available and let portage compute the rest.
-        
+
+        Uses hash algorithms that PyPI provides: md5, sha256.
+
+        Note on BLAKE2B: Modern Gentoo uses BLAKE2B (512-bit output, 128 hex chars),
+        but PyPI only provides blake2b_256 (256-bit output, 64 hex chars). These are
+        NOT compatible - different output sizes from the same algorithm. We cannot
+        use PyPI's blake2b_256 as Gentoo's BLAKE2B. SHA256 is sufficient for
+        portage verification.
+
         Args:
             download_info: Download information dictionary
             wanted_hashes: List of hash types to include (default: use PyPI available)
-            
+
         Returns:
             Manifest DIST entry string
-            
+
         Examples:
             >>> extractor = PyPIMetadataExtractor()
             >>> download_info = {
@@ -452,34 +456,34 @@ class PyPIMetadataExtractor:
             >>> entry = extractor.generate_manifest_entry(download_info)
             >>> entry.startswith('DIST numpy-1.21.0.tar.gz 10485760')
             True
-            >>> 'MD5' in entry
-            True
             >>> 'SHA256' in entry
             True
         """
         filename = download_info.get('filename', '')
         size = download_info.get('size', 0)
         digests = download_info.get('digests', {})
-        
+
         # Start with DIST entry
         entry_parts = ['DIST', filename, str(size)]
-        
-        # PyPI provides these hash types (in this order for consistency)
-        # We use what PyPI actually provides rather than what modern Gentoo prefers
+
+        # PyPI provides md5, sha256, and blake2b_256.
+        # We can only use md5 and sha256 because:
+        # - Gentoo BLAKE2B = 512-bit output (128 hex chars)
+        # - PyPI blake2b_256 = 256-bit output (64 hex chars)
+        # These are incompatible - different output sizes.
         pypi_hash_order = [
+            ('SHA256', 'sha256'),
             ('MD5', 'md5'),
-            ('SHA256', 'sha256'), 
-            ('BLAKE2B', 'blake2b_256'),  # PyPI's blake2b is 256-bit variant
         ]
-        
+
         if wanted_hashes:
             # Use requested hashes if specified
             hash_mapping = {
-                'BLAKE2B': 'blake2b_256',  # PyPI uses 256-bit variant
                 'SHA256': 'sha256',
-                'MD5': 'md5'
+                'MD5': 'md5',
+                # BLAKE2B intentionally not mapped - PyPI's blake2b_256 is incompatible
             }
-            
+
             for hash_type in wanted_hashes:
                 hash_key = hash_mapping.get(hash_type)
                 if hash_key and hash_key in digests:
@@ -489,7 +493,7 @@ class PyPIMetadataExtractor:
             for gentoo_name, pypi_name in pypi_hash_order:
                 if pypi_name in digests:
                     entry_parts.extend([gentoo_name, digests[pypi_name]])
-        
+
         return ' '.join(entry_parts)
     
     def get_package_metadata(self, package_json: Dict) -> Dict[str, Any]:
@@ -597,10 +601,11 @@ class PyPIMetadataExtractor:
                 parts = classifier.split('::')
                 if len(parts) >= 3:
                     version_part = parts[2].strip()
-                    # Match specific versions like 3.8, 3.9, etc.
-                    if version_part.replace('.', '').isdigit():
+                    # Match specific versions like 3.8, 3.9, etc. (must have a dot)
+                    # Skip generic versions like '3' - we need specific minor versions
+                    if '.' in version_part and version_part.replace('.', '').isdigit():
                         versions.append(version_part)
-        
+
         # Sort versions numerically
         versions.sort(key=lambda x: tuple(map(int, x.split('.'))))
         return versions
