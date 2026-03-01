@@ -586,8 +586,8 @@ The `.sys/pep517/` virtual filesystem allows overriding the `DISTUTILS_USE_PEP51
 
 | Value | Description |
 |-------|-------------|
-| `standalone` | Auto-detect (default) |
-| `setuptools` | setuptools backend |
+| `setuptools` | setuptools backend (default) |
+| `standalone` | Auto-detect |
 | `flit` | flit_core backend |
 | `hatchling` | hatchling backend |
 | `poetry` | poetry-core backend |
@@ -597,6 +597,28 @@ The `.sys/pep517/` virtual filesystem allows overriding the `DISTUTILS_USE_PEP51
 | `scikit-build-core` | scikit-build-core backend |
 | `sip` | sip backend |
 | `no` | Disable PEP517 (legacy setup.py) |
+
+### Configurable Global Default
+
+The global default PEP517 backend can be configured via `.sys/pep517-default`:
+
+```bash
+# Check the current default
+cat /var/db/repos/pypi/.sys/pep517-default
+# Output: setuptools
+
+# Change default to standalone (auto-detect)
+echo 'standalone' > /var/db/repos/pypi/.sys/pep517-default
+
+# Reset to the fallback default (setuptools)
+: > /var/db/repos/pypi/.sys/pep517-default
+```
+
+The resolution order is:
+1. Version-specific patch (e.g., `.sys/pep517/dev-python/pkg/1.0`)
+2. Package-wide patch (e.g., `.sys/pep517/dev-python/pkg/_all`)
+3. Configurable global default (`.sys/pep517-default`)
+4. Fallback: `setuptools`
 
 ### Example: Fix PEP517 Backend for pypdf
 

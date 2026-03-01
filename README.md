@@ -270,6 +270,7 @@ The `.sys/` virtual filesystem allows runtime modification of generated ebuilds:
 | `.sys/iuse/` | Add/remove USE flags |
 | `.sys/ebuild-append/` | Add custom phase functions |
 | `.sys/pep517/` | Override DISTUTILS_USE_PEP517 backend |
+| `.sys/pep517-default` | Set the global default PEP517 backend (default: setuptools) |
 
 ### Quick Example: Fix a Package
 
@@ -285,6 +286,9 @@ echo 'export MY_VAR=1' > /var/db/repos/pypi/.sys/ebuild-append/dev-python/pkg/_a
 
 # Fix PEP517 backend mismatch
 echo 'flit' > /var/db/repos/pypi/.sys/pep517/dev-python/pypdf/_all
+
+# Set global default PEP517 backend (alternative to per-package)
+echo 'standalone' > /var/db/repos/pypi/.sys/pep517-default
 ```
 
 See [docs/build-error-fixes.md](docs/build-error-fixes.md) for comprehensive examples.

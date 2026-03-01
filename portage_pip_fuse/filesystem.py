@@ -700,6 +700,12 @@ cache-formats = md5-dict
                         'filename': filename
                     }
 
+        elif parts[1] == 'pep517-default':
+            # .sys/pep517-default - file containing the default PEP517 backend
+            if len(parts) == 2:
+                return {'type': 'sys_pep517_default'}
+            return {'type': 'invalid'}
+
         elif parts[1] == '.git':
             # .sys/.git - git worktree file (NOT a directory)
             if len(parts) == 2:
@@ -1611,13 +1617,18 @@ cache-formats = md5-dict
             version = parsed['version']
             backend = self.pep517_patch_store.get_backend(category, package, version)
             if backend is None:
-                # No patch for this version - file doesn't exist
-                raise FuseOSError(errno.ENOENT)
-            attrs.update({
-                'st_mode': stat.S_IFREG | 0o644,
-                'st_nlink': 1,
-                'st_size': len(backend.encode('utf-8')) + 1,  # +1 for newline
-            })
+                # No patch yet - return empty file (allows creation via echo)
+                attrs.update({
+                    'st_mode': stat.S_IFREG | 0o644,
+                    'st_nlink': 1,
+                    'st_size': 0,
+                })
+            else:
+                attrs.update({
+                    'st_mode': stat.S_IFREG | 0o644,
+                    'st_nlink': 1,
+                    'st_size': len(backend.encode('utf-8')) + 1,  # +1 for newline
+                })
         elif parsed['type'] == 'sys_pep517_patch_file':
             # Patch file in .sys/pep517-patch/
             if self.pep517_patch_store is None:
@@ -1630,6 +1641,16 @@ cache-formats = md5-dict
                 'st_mode': stat.S_IFREG | 0o644,
                 'st_nlink': 1,
                 'st_size': len(content.encode('utf-8')),
+            })
+        elif parsed['type'] == 'sys_pep517_default':
+            # Default PEP517 backend file in .sys/pep517-default
+            if self.pep517_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            default = self.pep517_patch_store.get_default_backend()
+            attrs.update({
+                'st_mode': stat.S_IFREG | 0o644,
+                'st_nlink': 1,
+                'st_size': len(default.encode('utf-8')) + 1,  # +1 for newline
             })
         # Handle .sys/.git worktree file
         elif parsed['type'] == 'sys_git_file':
@@ -1764,7 +1785,7 @@ cache-formats = md5-dict
                 if self.iuse_patch_store is not None:
                     entries.extend(['iuse', 'iuse-patch'])
                 if self.pep517_patch_store is not None:
-                    entries.extend(['pep517', 'pep517-patch'])
+                    entries.extend(['pep517', 'pep517-patch', 'pep517-default'])
                 # Show .git file if it exists (for git worktree support)
                 if self._get_git_file_content() is not None:
                     entries.append('.git')
@@ -2115,16 +2136,14 @@ cache-formats = md5-dict
                                 entries.append(pkg)
 
             elif parsed['type'] == 'sys_pep517_package':
-                # /.sys/pep517/dev-python/pypdf - show versions with patches + _all
+                # /.sys/pep517/dev-python/pypdf - show all versions + _all
                 if self.pep517_patch_store is not None:
-                    category = parsed['category']
-                    package = parsed['package']
-                    # Show versions that have patches
-                    versions = self.pep517_patch_store.get_package_versions_with_patches(category, package)
-                    entries.extend(versions)
-                    # If _all is not in patches, still show it as an option
-                    if '_all' not in entries:
-                        entries.append('_all')
+                    gentoo_name = parsed['package']
+                    pypi_name = self._gentoo_to_pypi(gentoo_name)
+                    if pypi_name:
+                        versions = self._get_package_versions(pypi_name)
+                        entries.extend(versions)
+                        entries.append('_all')  # Always show _all for global patches
 
             elif parsed['type'] == 'sys_pep517_patch':
                 # /.sys/pep517-patch - show categories
@@ -2257,7 +2276,8 @@ cache-formats = md5-dict
             version = parsed['version']
             backend = self.pep517_patch_store.get_backend(category, package, version)
             if backend is None:
-                raise FuseOSError(errno.ENOENT)
+                # No patch yet - return empty
+                return b''
             content = (backend + '\n').encode('utf-8')
             return content[offset:offset + length]
 
@@ -2269,6 +2289,14 @@ cache-formats = md5-dict
             package = parsed['package']
             version = parsed['version']
             content = self.pep517_patch_store.generate_patch_file(category, package, version).encode('utf-8')
+            return content[offset:offset + length]
+
+        elif parsed['type'] == 'sys_pep517_default':
+            # Read the default PEP517 backend
+            if self.pep517_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            default = self.pep517_patch_store.get_default_backend()
+            content = (default + '\n').encode('utf-8')
             return content[offset:offset + length]
 
         # Handle .sys/.git file read
@@ -2321,7 +2349,8 @@ cache-formats = md5-dict
         elif parsed['type'] in ['sys_deps_dep', 'sys_depend_dep', 'sys_patch_file',
                                   'sys_compat_impl', 'sys_compat_patch_file',
                                   'sys_append_patch_file', 'sys_iuse_patch_file',
-                                  'sys_pep517_version', 'sys_pep517_patch_file']:
+                                  'sys_pep517_version', 'sys_pep517_patch_file',
+                                  'sys_pep517_default']:
             # Allow opening .sys files
             return 0
         elif parsed['type'] == 'sys_append_phase':
@@ -2537,12 +2566,16 @@ cache-formats = md5-dict
             ])
         else:
             # Sdist-based ebuild - use pypi eclass
-            # Get PEP517 backend - check patches first, then default to standalone
-            pep517_backend = 'standalone'
+            # Get PEP517 backend - check patches first, then configurable default
+            pep517_backend = None
             if self.pep517_patch_store is not None and package and version:
-                patched = self.pep517_patch_store.get_backend(category, package, version)
-                if patched:
-                    pep517_backend = patched
+                pep517_backend = self.pep517_patch_store.get_backend(category, package, version)
+            if pep517_backend is None:
+                # Use configurable default (falls back to 'setuptools')
+                if self.pep517_patch_store is not None:
+                    pep517_backend = self.pep517_patch_store.get_default_backend()
+                else:
+                    pep517_backend = 'setuptools'
 
             ebuild_lines.extend([
                 f"DISTUTILS_USE_PEP517={pep517_backend}",
@@ -3292,6 +3325,24 @@ cache-formats = md5-dict
 
             return len(data)
 
+        if parsed['type'] == 'sys_pep517_default':
+            # echo "flit" > /.sys/pep517-default
+            if self.pep517_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            # Decode and validate backend
+            backend = data.decode('utf-8', errors='replace').strip()
+            if not is_valid_pep517_backend(backend):
+                logger.warning(f"Invalid PEP517 backend: {backend}. Valid values: {', '.join(sorted(VALID_PEP517_BACKENDS))}")
+                raise FuseOSError(errno.EINVAL)
+
+            self.pep517_patch_store.set_default_backend(backend)
+            # Invalidate all cached ebuilds since default affects all packages
+            self._content_cache.clear()
+            logger.info(f"Set default PEP517 backend to: {backend}")
+
+            return len(data)
+
         raise FuseOSError(errno.EROFS)
 
     def truncate(self, path, length, fh=None):
@@ -3406,6 +3457,18 @@ cache-formats = md5-dict
                 version = parsed['version']
                 self.pep517_patch_store.remove_backend(category, package, version)
                 self._invalidate_package_cache(category, package)
+            return
+
+        if parsed['type'] == 'sys_pep517_default':
+            # Support truncate for default PEP517 backend file
+            if self.pep517_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            if length == 0:
+                # truncate to 0 = clear default (reverts to 'setuptools')
+                self.pep517_patch_store.clear_default_backend()
+                # Invalidate all cached ebuilds since default affects all packages
+                self._content_cache.clear()
             return
 
         raise FuseOSError(errno.EROFS)

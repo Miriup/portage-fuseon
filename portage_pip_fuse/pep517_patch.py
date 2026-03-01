@@ -2,11 +2,13 @@
 PEP517 backend patching system for runtime modification of DISTUTILS_USE_PEP517.
 
 This module provides a virtual filesystem API for overriding the PEP517 build backend
-for packages that require a different backend than auto-detected.
+for packages that require a different backend than the default.
+
+The global default can be configured via .sys/pep517-default (defaults to 'setuptools').
 
 Valid Backend Values:
-- standalone     : Auto-detect (default)
-- setuptools     : setuptools backend
+- setuptools     : setuptools backend (default)
+- standalone     : Auto-detect
 - flit           : flit_core backend
 - flit_core      : flit_core backend (alias)
 - hatchling      : hatchling backend
@@ -43,8 +45,8 @@ PATCH_FILE_VERSION = 3
 
 # Valid PEP517 backend values
 VALID_PEP517_BACKENDS = {
-    'standalone',       # Auto-detect (default)
-    'setuptools',
+    'setuptools',       # setuptools backend (default fallback)
+    'standalone',       # Auto-detect
     'flit',             # flit_core
     'flit_core',
     'hatchling',
@@ -191,6 +193,9 @@ class PEP517PatchStore:
         >>> import os; os.unlink(f.name)
     """
 
+    # Default fallback when no default is configured
+    FALLBACK_DEFAULT = 'setuptools'
+
     def __init__(self, storage_path: Optional[str] = None, mount_point: Optional[str] = None):
         """
         Initialize the patch store.
@@ -212,6 +217,7 @@ class PEP517PatchStore:
         self.storage_path = Path(storage_path) if storage_path else None
         self.mount_point = get_mount_point_key(mount_point) if mount_point else None
         self.patches: Dict[str, PackagePEP517Patch] = {}
+        self._default_backend: Optional[str] = None  # Configurable default
         self._dirty = False
 
         if self.storage_path and self.storage_path.exists():
@@ -227,24 +233,34 @@ class PEP517PatchStore:
                 data = json.load(f)
 
             self.patches = {}
+            self._default_backend = None
             version = data.get('version', 1)
 
             if version >= 3 and 'mount_points' in data:
-                # v3 format: mount_points -> {mount_point -> {pep517_patches: [...]}}
+                # v3 format: mount_points -> {mount_point -> {pep517_patches: [...], pep517_default: "..."}}
                 if self.mount_point and self.mount_point in data['mount_points']:
                     mp_data = data['mount_points'][self.mount_point]
                     for item in mp_data.get('pep517_patches', []):
                         pp = PackagePEP517Patch.from_dict(item)
                         self.patches[pp.key] = pp
+                    # Load default backend
+                    default = mp_data.get('pep517_default')
+                    if default and is_valid_pep517_backend(default):
+                        self._default_backend = default
                 # If mount_point not found, we'll have empty patches (new namespace)
             else:
                 # v1/v2/v4 legacy format: pep517_patches at top level
                 for item in data.get('pep517_patches', []):
                     pp = PackagePEP517Patch.from_dict(item)
                     self.patches[pp.key] = pp
+                # Legacy default
+                default = data.get('pep517_default')
+                if default and is_valid_pep517_backend(default):
+                    self._default_backend = default
 
             logger.info(f"Loaded {len(self.patches)} PEP517 patches from {self.storage_path}"
-                       + (f" (mount: {self.mount_point})" if self.mount_point else ""))
+                       + (f" (mount: {self.mount_point})" if self.mount_point else "")
+                       + (f" (default: {self._default_backend})" if self._default_backend else ""))
 
         except (json.JSONDecodeError, KeyError, OSError) as e:
             logger.error(f"Failed to load PEP517 patches from {self.storage_path}: {e}")
@@ -313,6 +329,11 @@ class PEP517PatchStore:
             existing_data['mount_points'][mp_key]['pep517_patches'] = [
                 pp.to_dict() for pp in self.patches.values() if pp.patch is not None
             ]
+            # Save default backend
+            if self._default_backend:
+                existing_data['mount_points'][mp_key]['pep517_default'] = self._default_backend
+            elif 'pep517_default' in existing_data['mount_points'][mp_key]:
+                del existing_data['mount_points'][mp_key]['pep517_default']
 
             # Write to temporary file first
             temp_path = self.storage_path.with_suffix('.tmp')
@@ -430,6 +451,65 @@ class PEP517PatchStore:
     def has_patch(self, category: str, package: str, version: str) -> bool:
         """Check if a patch exists for a package version."""
         return self.get_backend(category, package, version) is not None
+
+    def get_default_backend(self) -> str:
+        """
+        Get the configured default PEP517 backend.
+
+        Returns the configured default, or 'setuptools' if none is configured.
+
+        Returns:
+            The default backend string
+
+        Examples:
+            >>> store = PEP517PatchStore()
+            >>> store.get_default_backend()
+            'setuptools'
+            >>> store.set_default_backend('flit')
+            >>> store.get_default_backend()
+            'flit'
+        """
+        return self._default_backend or self.FALLBACK_DEFAULT
+
+    def set_default_backend(self, backend: str) -> None:
+        """
+        Set the default PEP517 backend for all packages.
+
+        Args:
+            backend: The default backend value (e.g., 'setuptools', 'flit')
+
+        Raises:
+            ValueError: If backend is not valid
+
+        Examples:
+            >>> store = PEP517PatchStore()
+            >>> store.set_default_backend('flit')
+            >>> store.get_default_backend()
+            'flit'
+        """
+        if not is_valid_pep517_backend(backend):
+            raise ValueError(f"Invalid PEP517 backend: {backend}. Valid values: {', '.join(sorted(VALID_PEP517_BACKENDS))}")
+        self._default_backend = backend
+        self._dirty = True
+        logger.info(f"Set default PEP517 backend to '{backend}'")
+
+    def clear_default_backend(self) -> None:
+        """
+        Clear the configured default PEP517 backend.
+
+        After clearing, get_default_backend() will return 'setuptools'.
+
+        Examples:
+            >>> store = PEP517PatchStore()
+            >>> store.set_default_backend('flit')
+            >>> store.clear_default_backend()
+            >>> store.get_default_backend()
+            'setuptools'
+        """
+        if self._default_backend is not None:
+            self._default_backend = None
+            self._dirty = True
+            logger.info("Cleared default PEP517 backend")
 
     def get_package_versions_with_patches(self, category: str, package: str) -> List[str]:
         """
