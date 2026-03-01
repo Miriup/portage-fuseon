@@ -258,30 +258,50 @@ emerge -pv dev-python/requests
 
 ## Implementation Details
 
-### Storage Format
+### Storage Format (v3)
 
-Patches are stored in JSON:
+Patches are stored in JSON with mount-point namespacing:
 
 ```json
 {
-  "version": 1,
-  "patches": [
-    {
-      "category": "dev-python",
-      "package": "requests",
-      "version": "2.31.0",
+  "version": 3,
+  "mount_points": {
+    "/var/db/repos/pypi": {
       "patches": [
         {
-          "operation": "modify",
-          "old_dep": "=dev-python/urllib3-1.26.18[${PYTHON_USEDEP}]",
-          "new_dep": ">=dev-python/urllib3-1.26.18[${PYTHON_USEDEP}]",
-          "timestamp": 1700000000.0
+          "category": "dev-python",
+          "package": "requests",
+          "version": "2.31.0",
+          "patches": [
+            {
+              "operation": "modify",
+              "old_dep": "=dev-python/urllib3-1.26.18[${PYTHON_USEDEP}]",
+              "new_dep": ">=dev-python/urllib3-1.26.18[${PYTHON_USEDEP}]",
+              "timestamp": 1700000000.0
+            }
+          ]
         }
-      ]
+      ],
+      "python_compat_patches": [...],
+      "ebuild_appends": [...],
+      "iuse_patches": [...],
+      "git_file_content": "gitdir: /home/user/pypi-config/.git/worktrees/pypi"
     }
-  ]
+  }
 }
 ```
+
+#### Version History
+
+| Version | Changes |
+|---------|---------|
+| 1 | Initial format with top-level `patches` array |
+| 2 | Added `python_compat_patches` |
+| 3 | Added mount-point namespacing and `git_file_content` |
+
+#### Backward Compatibility
+
+When loading v1/v2 files, patches are read from the top level. On first save, the file is migrated to v3 format with all existing data moved to the current mount point's namespace.
 
 ### Data Flow
 
@@ -350,6 +370,197 @@ When PyPI specifies exact versions, portage-pip-fuse often generates `|| ( )` gr
 The patch system extracts the package name (`dev-python/httpx`) from the first atom in the `|| ( )` group and replaces the entire group with your new dependency.
 
 This means you don't need to know whether the dependency is a simple atom or an `|| ( )` group - just target the package name and version.
+
+## Multiple Mount Points
+
+When running multiple FUSE instances with different mount points (e.g., `/var/db/repos/pypi` and `/mnt/pypi-wheels`), each instance has **isolated configuration**.
+
+### Mount-Point Namespacing
+
+Patches are namespaced by mount point in the JSON storage:
+
+```json
+{
+  "version": 3,
+  "mount_points": {
+    "/var/db/repos/pypi": {
+      "patches": [...],
+      "python_compat_patches": [...],
+      "ebuild_appends": [...],
+      "iuse_patches": [...]
+    },
+    "/mnt/pypi-wheels": {
+      "patches": [...],
+      ...
+    }
+  }
+}
+```
+
+This means:
+- Patches added on one mount point don't affect others
+- Each mount point can have different dependency modifications
+- The same `patches.json` file can be shared between mounts safely
+
+### Example: Separate Configurations
+
+```bash
+# Mount two instances with different purposes
+portage-pip-fuse mount /var/db/repos/pypi      # Production
+portage-pip-fuse mount /mnt/pypi-testing       # Testing
+
+# Add a patch to production only
+touch '/var/db/repos/pypi/.sys/dependencies/dev-python/requests/2.31.0/>=dev-python::urllib3-1.26'
+
+# The testing mount won't see this patch
+ls /mnt/pypi-testing/.sys/dependencies/dev-python/requests/2.31.0/
+# (urllib3 constraint unchanged)
+```
+
+### Using Separate Patch Files
+
+For complete isolation, use separate patch files:
+
+```bash
+portage-pip-fuse mount /var/db/repos/pypi --patch-file ~/.config/pypi-prod.json
+portage-pip-fuse mount /mnt/pypi-test --patch-file ~/.config/pypi-test.json
+```
+
+### Race Condition Warning
+
+When multiple FUSE instances share the same `patches.json` file, concurrent saves may cause one instance's changes to be lost. Each instance reads the full file, modifies its section, and writes back.
+
+**Mitigation**: Each mount point has an isolated namespace, so normal usage is safe. For guaranteed isolation with concurrent writes, use separate `--patch-file` paths.
+
+## Git Worktree Support
+
+The `.sys/` virtual filesystem can be version-controlled using git worktrees. This allows you to:
+- Track configuration changes in git
+- Share patches between systems via git
+- Roll back configuration changes
+- Maintain different configurations per branch
+
+### Setting Up Git Worktree
+
+1. Create a git repository to store your configuration:
+
+```bash
+# Create a repo for your PyPI patches
+mkdir ~/pypi-config
+cd ~/pypi-config
+git init
+git commit --allow-empty -m "Initial commit"
+```
+
+2. Add a worktree at your mount point's `.sys` directory:
+
+```bash
+# Mount the FUSE filesystem first
+portage-pip-fuse mount /var/db/repos/pypi
+
+# Add worktree (creates .sys/.git as a FILE, not directory)
+cd ~/pypi-config
+git worktree add /var/db/repos/pypi/.sys main
+```
+
+3. The `.sys/.git` file will contain:
+```
+gitdir: /home/user/pypi-config/.git/worktrees/pypi
+```
+
+### Git Worktree vs Git Init
+
+**Important**: Use `git worktree add`, NOT `git init`.
+
+- `git worktree add` creates `.git` as a **file** pointing to the main repo
+- `git init` tries to create `.git` as a **directory**, which is **denied** by the FUSE filesystem
+
+If you accidentally run `git init`, you'll see:
+```
+error: cannot mkdir .git: Operation not permitted
+```
+
+The log will show:
+```
+WARNING - Attempted mkdir .sys/.git - use 'git worktree add' instead of 'git init'.
+Create a repo elsewhere and use: git worktree add /mountpoint/.sys <branch>
+```
+
+### Committing Configuration Changes
+
+After making patch changes:
+
+```bash
+cd /var/db/repos/pypi/.sys
+
+# Stage your changes
+git add dependencies-patch/dev-python/requests/2.31.0.patch
+
+# Commit
+git commit -m "Loosen urllib3 constraint for requests 2.31.0"
+
+# Push to remote for backup/sharing
+git push origin main
+```
+
+### Managing Multiple Systems
+
+Create branches for different systems:
+
+```bash
+cd ~/pypi-config
+
+# Create branches for different machines
+git branch workstation
+git branch server
+
+# On workstation: use workstation branch
+git worktree add /var/db/repos/pypi/.sys workstation
+
+# On server: use server branch
+git worktree add /var/db/repos/pypi/.sys server
+```
+
+### Handling Merge Conflicts
+
+Since the FUSE filesystem stores patch content in `patches.json`, merge conflicts should be handled in the main repository clone (not the worktree):
+
+```bash
+cd ~/pypi-config
+
+# Resolve conflicts in the main repo
+git merge feature-branch
+# ... resolve conflicts ...
+git add .
+git commit
+
+# Changes automatically appear in worktree
+```
+
+### Example Workflow
+
+```bash
+# 1. Initial setup (once)
+mkdir ~/pypi-config && cd ~/pypi-config
+git init
+git commit --allow-empty -m "Initial pypi-config repo"
+
+# 2. Mount and link
+portage-pip-fuse mount /var/db/repos/pypi
+git worktree add /var/db/repos/pypi/.sys main
+
+# 3. Make changes via .sys filesystem
+cd /var/db/repos/pypi/.sys
+touch 'dependencies/dev-python/requests/2.31.0/>=dev-python::urllib3-1.26'
+
+# 4. Commit changes
+git add -A
+git commit -m "Loosen urllib3 for requests"
+
+# 5. Share with another system
+git remote add origin git@github.com:user/pypi-config.git
+git push -u origin main
+```
 
 ## Limitations
 
