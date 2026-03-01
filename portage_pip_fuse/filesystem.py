@@ -25,6 +25,8 @@ from fuse import FUSE, FuseOSError, Operations
 
 from .constants import REPO_NAME, DEFAULT_PATCH_FILE
 from .dependency_patch import DependencyPatchStore
+from .ebuild_append_patch import EbuildAppendPatchStore, is_valid_phase_name
+from .iuse_patch import IUSEPatchStore, is_valid_use_flag
 from .python_compat_patch import PythonCompatPatchStore
 from .interrupt import InterruptChecker, check_interrupt
 from .prefetcher import create_prefetched_translator
@@ -139,6 +141,26 @@ class PortagePipFS(Operations):
         else:
             self.compat_patch_store = None
 
+        # Initialize ebuild append patch store (uses same file as other patches)
+        if not no_patches:
+            if patch_file:
+                self.append_patch_store = EbuildAppendPatchStore(patch_file)
+            else:
+                self.append_patch_store = EbuildAppendPatchStore(str(DEFAULT_PATCH_FILE))
+            logger.info(f"Ebuild append patching enabled, using {self.append_patch_store.storage_path}")
+        else:
+            self.append_patch_store = None
+
+        # Initialize IUSE patch store (uses same file as other patches)
+        if not no_patches:
+            if patch_file:
+                self.iuse_patch_store = IUSEPatchStore(patch_file)
+            else:
+                self.iuse_patch_store = IUSEPatchStore(str(DEFAULT_PATCH_FILE))
+            logger.info(f"IUSE patching enabled, using {self.iuse_patch_store.storage_path}")
+        else:
+            self.iuse_patch_store = None
+
         # Static overlay structure
         self.static_dirs = {
             "/",
@@ -146,17 +168,32 @@ class PortagePipFS(Operations):
             "/profiles",
             "/metadata",
             "/eclass",
-            # .sys virtual filesystem for dependency patching
+            # .sys virtual filesystem for dependency patching (RDEPEND)
             "/.sys",
             "/.sys/dependencies",
             "/.sys/dependencies/dev-python",
             "/.sys/dependencies-patch",
             "/.sys/dependencies-patch/dev-python",
+            # .sys virtual filesystem for build dependencies (DEPEND)
+            "/.sys/depend",
+            "/.sys/depend/dev-python",
+            "/.sys/depend-patch",
+            "/.sys/depend-patch/dev-python",
             # .sys virtual filesystem for PYTHON_COMPAT patching
             "/.sys/python-compat",
             "/.sys/python-compat/dev-python",
             "/.sys/python-compat-patch",
-            "/.sys/python-compat-patch/dev-python"
+            "/.sys/python-compat-patch/dev-python",
+            # .sys virtual filesystem for ebuild phase appends
+            "/.sys/ebuild-append",
+            "/.sys/ebuild-append/dev-python",
+            "/.sys/ebuild-append-patch",
+            "/.sys/ebuild-append-patch/dev-python",
+            # .sys virtual filesystem for IUSE patching
+            "/.sys/iuse",
+            "/.sys/iuse/dev-python",
+            "/.sys/iuse-patch",
+            "/.sys/iuse-patch/dev-python"
         }
         
         # Static files
@@ -421,6 +458,53 @@ cache-formats = md5-dict
                         'filename': filename
                     }
 
+        elif parts[1] == 'depend':
+            # Build-time dependencies (DEPEND)
+            if len(parts) == 2:
+                # /.sys/depend
+                return {'type': 'sys_depend'}
+            elif len(parts) == 3:
+                # /.sys/depend/dev-python
+                return {'type': 'sys_depend_category', 'category': parts[2]}
+            elif len(parts) == 4:
+                # /.sys/depend/dev-python/gevent
+                return {'type': 'sys_depend_package', 'category': parts[2], 'package': parts[3]}
+            elif len(parts) == 5:
+                # /.sys/depend/dev-python/gevent/25.9.1
+                return {'type': 'sys_depend_version', 'category': parts[2], 'package': parts[3], 'version': parts[4]}
+            elif len(parts) == 6:
+                # /.sys/depend/dev-python/gevent/25.9.1/net-dns::c-ares
+                return {
+                    'type': 'sys_depend_dep',
+                    'category': parts[2],
+                    'package': parts[3],
+                    'version': parts[4],
+                    'dep': self._decode_dep_filename(parts[5])
+                }
+
+        elif parts[1] == 'depend-patch':
+            if len(parts) == 2:
+                # /.sys/depend-patch
+                return {'type': 'sys_depend_patch'}
+            elif len(parts) == 3:
+                # /.sys/depend-patch/dev-python
+                return {'type': 'sys_depend_patch_category', 'category': parts[2]}
+            elif len(parts) == 4:
+                # /.sys/depend-patch/dev-python/gevent
+                return {'type': 'sys_depend_patch_package', 'category': parts[2], 'package': parts[3]}
+            elif len(parts) == 5:
+                # /.sys/depend-patch/dev-python/gevent/25.9.1.patch
+                filename = parts[4]
+                if filename.endswith('.patch'):
+                    version = filename[:-6]  # Remove .patch
+                    return {
+                        'type': 'sys_depend_patch_file',
+                        'category': parts[2],
+                        'package': parts[3],
+                        'version': version,
+                        'filename': filename
+                    }
+
         elif parts[1] == 'python-compat':
             if len(parts) == 2:
                 # /.sys/python-compat
@@ -467,6 +551,98 @@ cache-formats = md5-dict
                         'filename': filename
                     }
 
+        elif parts[1] == 'ebuild-append':
+            if len(parts) == 2:
+                # /.sys/ebuild-append
+                return {'type': 'sys_append'}
+            elif len(parts) == 3:
+                # /.sys/ebuild-append/dev-python
+                return {'type': 'sys_append_category', 'category': parts[2]}
+            elif len(parts) == 4:
+                # /.sys/ebuild-append/dev-python/gevent
+                return {'type': 'sys_append_package', 'category': parts[2], 'package': parts[3]}
+            elif len(parts) == 5:
+                # /.sys/ebuild-append/dev-python/gevent/25.9.1 or _all
+                return {'type': 'sys_append_version', 'category': parts[2], 'package': parts[3], 'version': parts[4]}
+            elif len(parts) == 6:
+                # /.sys/ebuild-append/dev-python/gevent/25.9.1/src_configure
+                return {
+                    'type': 'sys_append_phase',
+                    'category': parts[2],
+                    'package': parts[3],
+                    'version': parts[4],
+                    'phase': parts[5]
+                }
+
+        elif parts[1] == 'ebuild-append-patch':
+            if len(parts) == 2:
+                # /.sys/ebuild-append-patch
+                return {'type': 'sys_append_patch'}
+            elif len(parts) == 3:
+                # /.sys/ebuild-append-patch/dev-python
+                return {'type': 'sys_append_patch_category', 'category': parts[2]}
+            elif len(parts) == 4:
+                # /.sys/ebuild-append-patch/dev-python/gevent
+                return {'type': 'sys_append_patch_package', 'category': parts[2], 'package': parts[3]}
+            elif len(parts) == 5:
+                # /.sys/ebuild-append-patch/dev-python/gevent/25.9.1.patch
+                filename = parts[4]
+                if filename.endswith('.patch'):
+                    version = filename[:-6]  # Remove .patch
+                    return {
+                        'type': 'sys_append_patch_file',
+                        'category': parts[2],
+                        'package': parts[3],
+                        'version': version,
+                        'filename': filename
+                    }
+
+        elif parts[1] == 'iuse':
+            if len(parts) == 2:
+                # /.sys/iuse
+                return {'type': 'sys_iuse'}
+            elif len(parts) == 3:
+                # /.sys/iuse/dev-python
+                return {'type': 'sys_iuse_category', 'category': parts[2]}
+            elif len(parts) == 4:
+                # /.sys/iuse/dev-python/gevent
+                return {'type': 'sys_iuse_package', 'category': parts[2], 'package': parts[3]}
+            elif len(parts) == 5:
+                # /.sys/iuse/dev-python/gevent/25.9.1 or _all
+                return {'type': 'sys_iuse_version', 'category': parts[2], 'package': parts[3], 'version': parts[4]}
+            elif len(parts) == 6:
+                # /.sys/iuse/dev-python/gevent/25.9.1/embed_cares
+                return {
+                    'type': 'sys_iuse_flag',
+                    'category': parts[2],
+                    'package': parts[3],
+                    'version': parts[4],
+                    'flag': parts[5]
+                }
+
+        elif parts[1] == 'iuse-patch':
+            if len(parts) == 2:
+                # /.sys/iuse-patch
+                return {'type': 'sys_iuse_patch'}
+            elif len(parts) == 3:
+                # /.sys/iuse-patch/dev-python
+                return {'type': 'sys_iuse_patch_category', 'category': parts[2]}
+            elif len(parts) == 4:
+                # /.sys/iuse-patch/dev-python/gevent
+                return {'type': 'sys_iuse_patch_package', 'category': parts[2], 'package': parts[3]}
+            elif len(parts) == 5:
+                # /.sys/iuse-patch/dev-python/gevent/25.9.1.patch
+                filename = parts[4]
+                if filename.endswith('.patch'):
+                    version = filename[:-6]  # Remove .patch
+                    return {
+                        'type': 'sys_iuse_patch_file',
+                        'category': parts[2],
+                        'package': parts[3],
+                        'version': version,
+                        'filename': filename
+                    }
+
         return {'type': 'invalid'}
 
     def _get_cached_content(self, path: str) -> Optional[bytes]:
@@ -496,7 +672,16 @@ cache-formats = md5-dict
     def _cache_metadata(self, pypi_name: str, metadata: dict):
         """Cache PyPI metadata with timestamp."""
         self._metadata_cache[pypi_name] = (metadata, time.time())
-        
+
+    def _invalidate_package_cache(self, category: str, package: str):
+        """Invalidate cached ebuild content for a package when patches change."""
+        # Remove all cached content for this package's ebuilds
+        prefix = f"/{category}/{package}/"
+        keys_to_remove = [k for k in self._content_cache if k.startswith(prefix)]
+        for key in keys_to_remove:
+            del self._content_cache[key]
+        logger.debug(f"Invalidated {len(keys_to_remove)} cached entries for {category}/{package}")
+
     def _gentoo_to_pypi(self, gentoo_name: str) -> Optional[str]:
         """Convert Gentoo package name to PyPI name."""
         try:
@@ -1035,14 +1220,17 @@ cache-formats = md5-dict
                 # Keep the default 2048 estimate
         # Handle .sys/ virtual filesystem paths
         elif parsed['type'] in ('sys_root', 'sys_deps', 'sys_deps_category',
-                                'sys_patch', 'sys_patch_category'):
+                                'sys_patch', 'sys_patch_category',
+                                'sys_depend', 'sys_depend_category',
+                                'sys_depend_patch', 'sys_depend_patch_category'):
             # Static .sys directories
             attrs.update({
                 'st_mode': stat.S_IFDIR | 0o755,
                 'st_nlink': 2,
                 'st_size': 4096,
             })
-        elif parsed['type'] in ('sys_deps_package', 'sys_deps_version', 'sys_patch_package'):
+        elif parsed['type'] in ('sys_deps_package', 'sys_deps_version', 'sys_patch_package',
+                                'sys_depend_package', 'sys_depend_version', 'sys_depend_patch_package'):
             # Dynamic .sys directories - verify package exists
             if self.patch_store is None:
                 raise FuseOSError(errno.ENOENT)
@@ -1055,8 +1243,8 @@ cache-formats = md5-dict
                 'st_nlink': 2,
                 'st_size': 4096,
             })
-        elif parsed['type'] == 'sys_deps_dep':
-            # Dependency file in .sys/dependencies/.../version/
+        elif parsed['type'] in ('sys_deps_dep', 'sys_depend_dep'):
+            # Dependency file in .sys/dependencies/.../version/ or .sys/depend/.../version/
             if self.patch_store is None:
                 raise FuseOSError(errno.ENOENT)
             # These are virtual files representing dependencies
@@ -1066,8 +1254,8 @@ cache-formats = md5-dict
                 'st_nlink': 1,
                 'st_size': len(dep_name.encode('utf-8')),
             })
-        elif parsed['type'] == 'sys_patch_file':
-            # Patch file in .sys/dependencies-patch/
+        elif parsed['type'] in ('sys_patch_file', 'sys_depend_patch_file'):
+            # Patch file in .sys/dependencies-patch/ or .sys/depend-patch/
             if self.patch_store is None:
                 raise FuseOSError(errno.ENOENT)
             category = parsed['category']
@@ -1119,6 +1307,110 @@ cache-formats = md5-dict
             package = parsed['package']
             version = parsed['version']
             content = self.compat_patch_store.generate_patch_file(category, package, version)
+            attrs.update({
+                'st_mode': stat.S_IFREG | 0o644,
+                'st_nlink': 1,
+                'st_size': len(content.encode('utf-8')),
+            })
+        # Handle .sys/ebuild-append/ virtual filesystem paths
+        elif parsed['type'] in ('sys_append', 'sys_append_category',
+                                'sys_append_patch', 'sys_append_patch_category'):
+            # Static .sys/ebuild-append directories
+            attrs.update({
+                'st_mode': stat.S_IFDIR | 0o755,
+                'st_nlink': 2,
+                'st_size': 4096,
+            })
+        elif parsed['type'] in ('sys_append_package', 'sys_append_version', 'sys_append_patch_package'):
+            # Dynamic .sys/ebuild-append directories - verify package exists
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            gentoo_name = parsed['package']
+            pypi_name = self._gentoo_to_pypi(gentoo_name)
+            if not pypi_name or not self._package_exists(pypi_name):
+                raise FuseOSError(errno.ENOENT)
+            attrs.update({
+                'st_mode': stat.S_IFDIR | 0o755,
+                'st_nlink': 2,
+                'st_size': 4096,
+            })
+        elif parsed['type'] == 'sys_append_phase':
+            # Phase file in .sys/ebuild-append/.../version/
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            phase = parsed['phase']
+            # Reject invalid phase names (e.g., vim swap files like .foo.swp)
+            if not is_valid_phase_name(phase):
+                raise FuseOSError(errno.ENOENT)
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+            content = self.append_patch_store.get_phase(category, package, version, phase)
+            if content is None:
+                # Phase doesn't exist yet - return size 0 for new files
+                content = ''
+            attrs.update({
+                'st_mode': stat.S_IFREG | 0o644,
+                'st_nlink': 1,
+                'st_size': len(content.encode('utf-8')),
+            })
+        elif parsed['type'] == 'sys_append_patch_file':
+            # Patch file in .sys/ebuild-append-patch/
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+            content = self.append_patch_store.generate_patch_file(category, package, version)
+            attrs.update({
+                'st_mode': stat.S_IFREG | 0o644,
+                'st_nlink': 1,
+                'st_size': len(content.encode('utf-8')),
+            })
+        # Handle .sys/iuse/ virtual filesystem paths
+        elif parsed['type'] in ('sys_iuse', 'sys_iuse_category',
+                                'sys_iuse_patch', 'sys_iuse_patch_category'):
+            # Static .sys/iuse directories
+            attrs.update({
+                'st_mode': stat.S_IFDIR | 0o755,
+                'st_nlink': 2,
+                'st_size': 4096,
+            })
+        elif parsed['type'] in ('sys_iuse_package', 'sys_iuse_version', 'sys_iuse_patch_package'):
+            # Dynamic .sys/iuse directories - verify package exists
+            if self.iuse_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            gentoo_name = parsed['package']
+            pypi_name = self._gentoo_to_pypi(gentoo_name)
+            if not pypi_name or not self._package_exists(pypi_name):
+                raise FuseOSError(errno.ENOENT)
+            attrs.update({
+                'st_mode': stat.S_IFDIR | 0o755,
+                'st_nlink': 2,
+                'st_size': 4096,
+            })
+        elif parsed['type'] == 'sys_iuse_flag':
+            # USE flag file in .sys/iuse/.../version/
+            if self.iuse_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            flag = parsed['flag']
+            # Reject invalid USE flag names (e.g., vim swap files like .foo.swp)
+            if not is_valid_use_flag(flag):
+                raise FuseOSError(errno.ENOENT)
+            # USE flag files are just empty files that indicate the flag exists
+            attrs.update({
+                'st_mode': stat.S_IFREG | 0o644,
+                'st_nlink': 1,
+                'st_size': 0,
+            })
+        elif parsed['type'] == 'sys_iuse_patch_file':
+            # Patch file in .sys/iuse-patch/
+            if self.iuse_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+            content = self.iuse_patch_store.generate_patch_file(category, package, version)
             attrs.update({
                 'st_mode': stat.S_IFREG | 0o644,
                 'st_nlink': 1,
@@ -1238,9 +1530,13 @@ cache-formats = md5-dict
             elif parsed['type'] == 'sys_root':
                 # /.sys - show all virtual filesystem sections
                 if self.patch_store is not None:
-                    entries.extend(['dependencies', 'dependencies-patch'])
+                    entries.extend(['dependencies', 'dependencies-patch', 'depend', 'depend-patch'])
                 if self.compat_patch_store is not None:
                     entries.extend(['python-compat', 'python-compat-patch'])
+                if self.append_patch_store is not None:
+                    entries.extend(['ebuild-append', 'ebuild-append-patch'])
+                if self.iuse_patch_store is not None:
+                    entries.extend(['iuse', 'iuse-patch'])
 
             elif parsed['type'] == 'sys_deps':
                 # /.sys/dependencies - show categories
@@ -1288,7 +1584,7 @@ cache-formats = md5-dict
                     # Original deps would require fetching package info which can block
                     patches = self.patch_store.get_patches(category, gentoo_name, version)
                     for patch in patches:
-                        if patch.action == 'add' and patch.dependency:
+                        if patch.operation == 'add' and patch.dependency and patch.dep_type == 'rdepend':
                             entries.append(self._encode_dep_filename(patch.dependency))
                     # Note: Full dep listing requires 'cat' on a specific dep file
 
@@ -1306,6 +1602,71 @@ cache-formats = md5-dict
 
             elif parsed['type'] == 'sys_patch_package':
                 # /.sys/dependencies-patch/dev-python/requests - show version.patch files
+                if self.patch_store is not None:
+                    category = parsed['category']
+                    package = parsed['package']
+                    versions = self.patch_store.get_package_versions_with_patches(category, package)
+                    for ver in versions:
+                        entries.append(f"{ver}.patch")
+
+            # Handle .sys/depend/ directories (build-time dependencies)
+            elif parsed['type'] == 'sys_depend':
+                # /.sys/depend - show categories
+                if self.patch_store is not None:
+                    entries.append('dev-python')
+
+            elif parsed['type'] == 'sys_depend_category':
+                # /.sys/depend/dev-python - show packages with patches or cached packages
+                if self.patch_store is not None:
+                    # Show packages that have patches
+                    for cat, pkg, ver in self.patch_store.list_patched_packages():
+                        if cat == parsed['category'] and pkg not in entries:
+                            entries.append(pkg)
+                    # Also show all cached packages for convenience
+                    cache_key = 'dev-python'
+                    if cache_key in self._category_cache:
+                        cached_packages, _ = self._category_cache[cache_key]
+                        for pkg in cached_packages:
+                            if pkg not in entries:
+                                entries.append(pkg)
+
+            elif parsed['type'] == 'sys_depend_package':
+                # /.sys/depend/dev-python/gevent - show versions
+                if self.patch_store is not None:
+                    gentoo_name = parsed['package']
+                    pypi_name = self._gentoo_to_pypi(gentoo_name)
+                    if pypi_name:
+                        cache_key = f"versions_{pypi_name}"
+                        if cache_key in self._metadata_cache:
+                            versions, _ = self._metadata_cache[cache_key]
+                            entries.extend(versions)
+                        entries.append('_all')
+
+            elif parsed['type'] == 'sys_depend_version':
+                # /.sys/depend/dev-python/gevent/25.9.1 - show DEPEND dependencies
+                if self.patch_store is not None:
+                    gentoo_name = parsed['package']
+                    version = parsed['version']
+                    category = parsed['category']
+                    patches = self.patch_store.get_patches(category, gentoo_name, version)
+                    for patch in patches:
+                        if patch.operation == 'add' and patch.dependency and patch.dep_type == 'depend':
+                            entries.append(self._encode_dep_filename(patch.dependency))
+
+            elif parsed['type'] == 'sys_depend_patch':
+                # /.sys/depend-patch - show categories
+                if self.patch_store is not None:
+                    entries.append('dev-python')
+
+            elif parsed['type'] == 'sys_depend_patch_category':
+                # /.sys/depend-patch/dev-python - show packages with patches
+                if self.patch_store is not None:
+                    for cat, pkg, ver in self.patch_store.list_patched_packages():
+                        if cat == parsed['category'] and pkg not in entries:
+                            entries.append(pkg)
+
+            elif parsed['type'] == 'sys_depend_patch_package':
+                # /.sys/depend-patch/dev-python/gevent - show version.patch files
                 if self.patch_store is not None:
                     category = parsed['category']
                     package = parsed['package']
@@ -1377,6 +1738,130 @@ cache-formats = md5-dict
                     for ver in versions:
                         entries.append(f"{ver}.patch")
 
+            # Handle .sys/ebuild-append/ directories
+            elif parsed['type'] == 'sys_append':
+                # /.sys/ebuild-append - show categories
+                if self.append_patch_store is not None:
+                    entries.append('dev-python')
+
+            elif parsed['type'] == 'sys_append_category':
+                # /.sys/ebuild-append/dev-python - show packages with phases or cached packages
+                if self.append_patch_store is not None:
+                    # Show packages that have phases
+                    for cat, pkg, ver in self.append_patch_store.list_patched_packages():
+                        if cat == parsed['category'] and pkg not in entries:
+                            entries.append(pkg)
+                    # Also show all cached packages for convenience
+                    cache_key = 'dev-python'
+                    if cache_key in self._category_cache:
+                        cached_packages, _ = self._category_cache[cache_key]
+                        for pkg in cached_packages:
+                            if pkg not in entries:
+                                entries.append(pkg)
+
+            elif parsed['type'] == 'sys_append_package':
+                # /.sys/ebuild-append/dev-python/gevent - show versions
+                if self.append_patch_store is not None:
+                    gentoo_name = parsed['package']
+                    pypi_name = self._gentoo_to_pypi(gentoo_name)
+                    if pypi_name:
+                        versions = self._get_package_versions(pypi_name)
+                        entries.extend(versions)
+                        entries.append('_all')  # Always show _all for global patches
+
+            elif parsed['type'] == 'sys_append_version':
+                # /.sys/ebuild-append/dev-python/gevent/25.9.1 - show phase files
+                if self.append_patch_store is not None:
+                    category = parsed['category']
+                    package = parsed['package']
+                    version = parsed['version']
+                    # Show all phases defined for this version (including _all phases)
+                    phases = self.append_patch_store.get_phases(category, package, version)
+                    entries.extend(sorted(phases.keys()))
+
+            elif parsed['type'] == 'sys_append_patch':
+                # /.sys/ebuild-append-patch - show categories
+                if self.append_patch_store is not None:
+                    entries.append('dev-python')
+
+            elif parsed['type'] == 'sys_append_patch_category':
+                # /.sys/ebuild-append-patch/dev-python - show packages with phases
+                if self.append_patch_store is not None:
+                    for cat, pkg, ver in self.append_patch_store.list_patched_packages():
+                        if cat == parsed['category'] and pkg not in entries:
+                            entries.append(pkg)
+
+            elif parsed['type'] == 'sys_append_patch_package':
+                # /.sys/ebuild-append-patch/dev-python/gevent - show version.patch files
+                if self.append_patch_store is not None:
+                    category = parsed['category']
+                    package = parsed['package']
+                    versions = self.append_patch_store.get_package_versions_with_phases(category, package)
+                    for ver in versions:
+                        entries.append(f"{ver}.patch")
+
+            # Handle .sys/iuse/ directories
+            elif parsed['type'] == 'sys_iuse':
+                # /.sys/iuse - show categories
+                if self.iuse_patch_store is not None:
+                    entries.append('dev-python')
+
+            elif parsed['type'] == 'sys_iuse_category':
+                # /.sys/iuse/dev-python - show packages with patches or cached packages
+                if self.iuse_patch_store is not None:
+                    # Show packages that have patches
+                    for cat, pkg, ver in self.iuse_patch_store.list_patched_packages():
+                        if cat == parsed['category'] and pkg not in entries:
+                            entries.append(pkg)
+                    # Also show all cached packages for convenience
+                    cache_key = 'dev-python'
+                    if cache_key in self._category_cache:
+                        cached_packages, _ = self._category_cache[cache_key]
+                        for pkg in cached_packages:
+                            if pkg not in entries:
+                                entries.append(pkg)
+
+            elif parsed['type'] == 'sys_iuse_package':
+                # /.sys/iuse/dev-python/gevent - show versions
+                if self.iuse_patch_store is not None:
+                    gentoo_name = parsed['package']
+                    pypi_name = self._gentoo_to_pypi(gentoo_name)
+                    if pypi_name:
+                        versions = self._get_package_versions(pypi_name)
+                        entries.extend(versions)
+                        entries.append('_all')  # Always show _all for global patches
+
+            elif parsed['type'] == 'sys_iuse_version':
+                # /.sys/iuse/dev-python/gevent/25.9.1 - show USE flags
+                if self.iuse_patch_store is not None:
+                    category = parsed['category']
+                    package = parsed['package']
+                    version = parsed['version']
+                    # Show flags that have been added via patches
+                    flags = self.iuse_patch_store.get_current_flags(category, package, version)
+                    entries.extend(flags)
+
+            elif parsed['type'] == 'sys_iuse_patch':
+                # /.sys/iuse-patch - show categories
+                if self.iuse_patch_store is not None:
+                    entries.append('dev-python')
+
+            elif parsed['type'] == 'sys_iuse_patch_category':
+                # /.sys/iuse-patch/dev-python - show packages with patches
+                if self.iuse_patch_store is not None:
+                    for cat, pkg, ver in self.iuse_patch_store.list_patched_packages():
+                        if cat == parsed['category'] and pkg not in entries:
+                            entries.append(pkg)
+
+            elif parsed['type'] == 'sys_iuse_patch_package':
+                # /.sys/iuse-patch/dev-python/gevent - show version.patch files
+                if self.iuse_patch_store is not None:
+                    category = parsed['category']
+                    package = parsed['package']
+                    versions = self.iuse_patch_store.get_package_versions_with_patches(category, package)
+                    for ver in versions:
+                        entries.append(f"{ver}.patch")
+
         except InterruptedError:
             logger.info(f"readdir interrupted for {path}")
             # Return minimal result on interrupt
@@ -1403,12 +1888,12 @@ cache-formats = md5-dict
             return content[offset:offset + length]
 
         # Handle .sys/ file reads
-        elif parsed['type'] == 'sys_deps_dep':
+        elif parsed['type'] in ('sys_deps_dep', 'sys_depend_dep'):
             # Read a dependency file - just return the dep name
             content = parsed['dep'].encode('utf-8')
             return content[offset:offset + length]
 
-        elif parsed['type'] == 'sys_patch_file':
+        elif parsed['type'] in ('sys_patch_file', 'sys_depend_patch_file'):
             # Read a patch file
             if self.patch_store is None:
                 raise FuseOSError(errno.ENOENT)
@@ -1432,6 +1917,49 @@ cache-formats = md5-dict
             package = parsed['package']
             version = parsed['version']
             content = self.compat_patch_store.generate_patch_file(category, package, version).encode('utf-8')
+            return content[offset:offset + length]
+
+        # Handle .sys/ebuild-append/ file reads
+        elif parsed['type'] == 'sys_append_phase':
+            # Read a phase file - return the phase content
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            phase = parsed['phase']
+            # Reject invalid phase names (e.g., vim swap files)
+            if not is_valid_phase_name(phase):
+                raise FuseOSError(errno.ENOENT)
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+            phase_content = self.append_patch_store.get_phase(category, package, version, phase)
+            if phase_content is None:
+                phase_content = ''
+            content = phase_content.encode('utf-8')
+            return content[offset:offset + length]
+
+        elif parsed['type'] == 'sys_append_patch_file':
+            # Read an ebuild append patch file
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+            content = self.append_patch_store.generate_patch_file(category, package, version).encode('utf-8')
+            return content[offset:offset + length]
+
+        # Handle .sys/iuse/ file reads
+        elif parsed['type'] == 'sys_iuse_flag':
+            # Read a USE flag file - return empty (file existence is what matters)
+            return b''
+
+        elif parsed['type'] == 'sys_iuse_patch_file':
+            # Read an IUSE patch file
+            if self.iuse_patch_store is None:
+                raise FuseOSError(errno.ENOENT)
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+            content = self.iuse_patch_store.generate_patch_file(category, package, version).encode('utf-8')
             return content[offset:offset + length]
 
         try:
@@ -1474,9 +2002,20 @@ cache-formats = md5-dict
                     logger.debug(f"Cannot translate package name: {gentoo_name}")
                     raise FuseOSError(errno.ENOENT)
             return 0
-        elif parsed['type'] in ['sys_deps_dep', 'sys_patch_file',
-                                  'sys_compat_impl', 'sys_compat_patch_file']:
+        elif parsed['type'] in ['sys_deps_dep', 'sys_depend_dep', 'sys_patch_file',
+                                  'sys_compat_impl', 'sys_compat_patch_file',
+                                  'sys_append_patch_file', 'sys_iuse_patch_file']:
             # Allow opening .sys files
+            return 0
+        elif parsed['type'] == 'sys_append_phase':
+            # Validate phase name before allowing open
+            if not is_valid_phase_name(parsed['phase']):
+                raise FuseOSError(errno.ENOENT)
+            return 0
+        elif parsed['type'] == 'sys_iuse_flag':
+            # Validate USE flag name before allowing open
+            if not is_valid_use_flag(parsed['flag']):
+                raise FuseOSError(errno.ENOENT)
             return 0
 
         logger.debug(f"Cannot open path: {path} (type: {parsed['type']})")
@@ -1598,29 +2137,46 @@ cache-formats = md5-dict
                 return None
 
             # Apply dependency patches if enabled
-            if self.patch_store is not None and ebuild_data.get('RDEPEND'):
-                original_rdepend = ebuild_data['RDEPEND']
+            if self.patch_store is not None:
+                # Apply RDEPEND patches (always, even if no existing RDEPEND)
+                rdepend_list = ebuild_data.get('RDEPEND', [])
                 patched_rdepend = self.patch_store.apply_patches(
-                    category, package, version, original_rdepend
+                    category, package, version, rdepend_list, dep_type='rdepend'
                 )
-                ebuild_data['RDEPEND'] = patched_rdepend
+                if patched_rdepend:
+                    ebuild_data['RDEPEND'] = patched_rdepend
 
                 # Also patch OPTIONAL_DEPEND if present
                 if ebuild_data.get('OPTIONAL_DEPEND'):
                     for use_flag, deps in ebuild_data['OPTIONAL_DEPEND'].items():
                         patched_deps = self.patch_store.apply_patches(
-                            category, package, version, deps
+                            category, package, version, deps, dep_type='rdepend'
                         )
                         ebuild_data['OPTIONAL_DEPEND'][use_flag] = patched_deps
 
+                # Apply DEPEND patches (build-time dependencies)
+                depend_list = ebuild_data.get('DEPEND', [])
+                patched_depend = self.patch_store.apply_patches(
+                    category, package, version, depend_list, dep_type='depend'
+                )
+                if patched_depend:
+                    ebuild_data['DEPEND'] = patched_depend
+
+            # Apply IUSE patches if enabled
+            if self.iuse_patch_store is not None:
+                iuse = ebuild_data.get('IUSE', [])
+                iuse = self.iuse_patch_store.apply_patches(category, package, version, iuse)
+                ebuild_data['IUSE'] = iuse
+
             # Generate ebuild from template
-            return self._format_ebuild(ebuild_data)
-            
+            return self._format_ebuild(ebuild_data, category, package, version)
+
         except Exception as e:
             logger.error(f"Error generating ebuild for {package}-{version}: {e}")
             return None
-    
-    def _format_ebuild(self, data: dict) -> str:
+
+    def _format_ebuild(self, data: dict, category: str = 'dev-python',
+                       package: str = '', version: str = '') -> str:
         """Format ebuild data into ebuild file content."""
         ebuild_lines = [
             f"# Copyright 2026 Gentoo Authors",
@@ -1675,15 +2231,16 @@ cache-formats = md5-dict
                     ebuild_lines.append(f"\t{use_flag}? ( {deps_str} )")
             ebuild_lines.append(f"\"")
 
-        # Add python_compile_pre to clean bundled autoconf caches between Python impls
-        # This fixes packages like gevent that bundle c-ares/libev with config.cache
-        ebuild_lines.extend([
-            f"",
-            f"python_compile_pre() {{",
-            f"\t# Clean autoconf caches from bundled deps to avoid conflicts between Python impls",
-            f"\tfind \"${{S}}\" -name config.cache -delete 2>/dev/null || true",
-            f"}}",
-        ])
+        # Apply ebuild phase appends from .sys/ebuild-append/ if available
+        if self.append_patch_store is not None and package and version:
+            phases = self.append_patch_store.apply_phases(category, package, version)
+            for phase_name in sorted(phases.keys()):
+                content = phases[phase_name]
+                ebuild_lines.append(f"")
+                ebuild_lines.append(f"{phase_name}() {{")
+                for line in content.split('\n'):
+                    ebuild_lines.append(f"\t{line}")
+                ebuild_lines.append(f"}}")
 
         return '\n'.join(ebuild_lines) + '\n'
         
@@ -1776,6 +2333,20 @@ cache-formats = md5-dict
                 logger.info(f"PYTHON_COMPAT patches saved to {self.compat_patch_store.storage_path}")
             else:
                 logger.error("Failed to save PYTHON_COMPAT patches!")
+
+        if self.append_patch_store is not None and self.append_patch_store.is_dirty:
+            logger.info("Saving ebuild append patches...")
+            if self.append_patch_store.save():
+                logger.info(f"Ebuild append patches saved to {self.append_patch_store.storage_path}")
+            else:
+                logger.error("Failed to save ebuild append patches!")
+
+        if self.iuse_patch_store is not None and self.iuse_patch_store.is_dirty:
+            logger.info("Saving IUSE patches...")
+            if self.iuse_patch_store.save():
+                logger.info(f"IUSE patches saved to {self.iuse_patch_store.storage_path}")
+            else:
+                logger.error("Failed to save IUSE patches!")
 
         # Close the extractor properly
         if hasattr(self.pypi_extractor, 'close'):
@@ -1897,8 +2468,24 @@ cache-formats = md5-dict
             version = parsed['version']
             new_dep = parsed['dep']
 
-            self.patch_store.add_dependency(category, package, version, new_dep)
-            logger.info(f"Added dependency via touch: {new_dep} to {category}/{package}/{version}")
+            self.patch_store.add_dependency(category, package, version, new_dep, dep_type='rdepend')
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Added RDEPEND via touch: {new_dep} to {category}/{package}/{version}")
+            return 0
+
+        if parsed['type'] == 'sys_depend_dep':
+            # touch /.sys/depend/dev-python/pkg/ver/net-dns::c-ares
+            if self.patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+            new_dep = parsed['dep']
+
+            self.patch_store.add_dependency(category, package, version, new_dep, dep_type='depend')
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Added DEPEND via touch: {new_dep} to {category}/{package}/{version}")
             return 0
 
         if parsed['type'] == 'sys_compat_impl':
@@ -1912,7 +2499,53 @@ cache-formats = md5-dict
             impl = parsed['impl']
 
             self.compat_patch_store.add_impl(category, package, version, impl)
+            self._invalidate_package_cache(category, package)
             logger.info(f"Added impl via touch: {impl} to {category}/{package}/{version}")
+            return 0
+
+        if parsed['type'] == 'sys_append_phase':
+            # touch /.sys/ebuild-append/dev-python/pkg/ver/src_configure
+            # Creates an empty phase file - content will be set via write()
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+            phase = parsed['phase']
+            # Reject invalid phase names (e.g., vim swap files)
+            if not is_valid_phase_name(phase):
+                raise FuseOSError(errno.EINVAL)
+            # Just allow creation - actual content set via write()
+            return 0
+
+        if parsed['type'] == 'sys_append_patch_file':
+            # touch /.sys/ebuild-append-patch/dev-python/pkg/ver.patch
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+            # Just allow creation - actual content set via write()
+            return 0
+
+        if parsed['type'] == 'sys_iuse_flag':
+            # touch /.sys/iuse/dev-python/pkg/ver/embed_cares
+            # Creates a USE flag (adds it via patch)
+            if self.iuse_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+            flag = parsed['flag']
+            # Reject invalid USE flag names
+            if not is_valid_use_flag(flag):
+                raise FuseOSError(errno.EINVAL)
+
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+
+            self.iuse_patch_store.add_flag(category, package, version, flag)
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Added USE flag via touch: {flag} to {category}/{package}/{version}")
+            return 0
+
+        if parsed['type'] == 'sys_iuse_patch_file':
+            # touch /.sys/iuse-patch/dev-python/pkg/ver.patch
+            if self.iuse_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+            # Just allow creation - actual content set via write()
             return 0
 
         raise FuseOSError(errno.EROFS)
@@ -1931,8 +2564,24 @@ cache-formats = md5-dict
             version = parsed['version']
             old_dep = parsed['dep']
 
-            self.patch_store.remove_dependency(category, package, version, old_dep)
-            logger.info(f"Removed dependency via rm: {old_dep} from {category}/{package}/{version}")
+            self.patch_store.remove_dependency(category, package, version, old_dep, dep_type='rdepend')
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Removed RDEPEND via rm: {old_dep} from {category}/{package}/{version}")
+            return
+
+        if parsed['type'] == 'sys_depend_dep':
+            # rm /.sys/depend/dev-python/pkg/ver/net-dns::c-ares
+            if self.patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+            old_dep = parsed['dep']
+
+            self.patch_store.remove_dependency(category, package, version, old_dep, dep_type='depend')
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Removed DEPEND via rm: {old_dep} from {category}/{package}/{version}")
             return
 
         if parsed['type'] == 'sys_compat_impl':
@@ -1946,7 +2595,46 @@ cache-formats = md5-dict
             impl = parsed['impl']
 
             self.compat_patch_store.remove_impl(category, package, version, impl)
+            self._invalidate_package_cache(category, package)
             logger.info(f"Removed impl via rm: {impl} from {category}/{package}/{version}")
+            return
+
+        if parsed['type'] == 'sys_append_phase':
+            # rm /.sys/ebuild-append/dev-python/pkg/ver/src_configure
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            phase = parsed['phase']
+            # Reject invalid phase names
+            if not is_valid_phase_name(phase):
+                raise FuseOSError(errno.ENOENT)
+
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+
+            self.append_patch_store.remove_phase(category, package, version, phase)
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Removed phase via rm: {phase} from {category}/{package}/{version}")
+            return
+
+        if parsed['type'] == 'sys_iuse_flag':
+            # rm /.sys/iuse/dev-python/pkg/ver/embed_cares
+            if self.iuse_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            flag = parsed['flag']
+            # Reject invalid USE flag names
+            if not is_valid_use_flag(flag):
+                raise FuseOSError(errno.ENOENT)
+
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+
+            self.iuse_patch_store.unlink_flag(category, package, version, flag)
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Removed USE flag via rm: {flag} from {category}/{package}/{version}")
             return
 
         raise FuseOSError(errno.EROFS)
@@ -1974,6 +2662,7 @@ cache-formats = md5-dict
             new_dep = new_parsed['dep']
 
             self.patch_store.modify_dependency(category, package, version, old_dep, new_dep)
+            self._invalidate_package_cache(category, package)
             logger.info(f"Modified dependency via mv: {old_dep} -> {new_dep}")
             return
 
@@ -1998,6 +2687,7 @@ cache-formats = md5-dict
             # Clear existing patches and import new ones
             self.patch_store.clear_patches(category, package, version)
             count = self.patch_store.parse_patch_file(content, category, package, version)
+            self._invalidate_package_cache(category, package)
             logger.info(f"Imported {count} dependency patches via write to {path}")
 
             return len(data)
@@ -2017,7 +2707,81 @@ cache-formats = md5-dict
             # Clear existing patches and import new ones
             self.compat_patch_store.clear_patches(category, package, version)
             count = self.compat_patch_store.parse_patch_file(content, category, package, version)
+            self._invalidate_package_cache(category, package)
             logger.info(f"Imported {count} PYTHON_COMPAT patches via write to {path}")
+
+            return len(data)
+
+        if parsed['type'] == 'sys_append_phase':
+            # echo "..." > /.sys/ebuild-append/dev-python/pkg/ver/src_configure
+            # echo "..." >> /.sys/ebuild-append/dev-python/pkg/ver/src_configure (append mode)
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            phase = parsed['phase']
+            # Reject invalid phase names (e.g., vim swap files)
+            if not is_valid_phase_name(phase):
+                raise FuseOSError(errno.EINVAL)
+
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+
+            # Decode new content
+            new_content = data.decode('utf-8', errors='replace')
+
+            # Handle append mode: if offset > 0, prepend existing content
+            if offset > 0:
+                existing = self.append_patch_store.get_phase(category, package, version, phase)
+                if existing:
+                    # Append new content to existing (FUSE sends offset as existing length)
+                    # Add newline between because set_phase() strips trailing newlines
+                    new_content = existing + '\n' + new_content
+                # If no existing content, just use new_content as-is
+
+            self.append_patch_store.set_phase(category, package, version, phase, new_content)
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Set phase {phase} via write to {path}")
+
+            return len(data)
+
+        if parsed['type'] == 'sys_append_patch_file':
+            # echo "..." > /.sys/ebuild-append-patch/dev-python/pkg/ver.patch
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+
+            # Decode and parse patch content
+            content = data.decode('utf-8', errors='replace')
+
+            # Clear existing phases and import new ones
+            self.append_patch_store.clear_phases(category, package, version)
+            count = self.append_patch_store.parse_patch_file(content, category, package, version)
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Imported {count} ebuild phases via write to {path}")
+
+            return len(data)
+
+        if parsed['type'] == 'sys_iuse_patch_file':
+            # echo "..." > /.sys/iuse-patch/dev-python/pkg/ver.patch
+            if self.iuse_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            category = parsed['category']
+            package = parsed['package']
+            version = parsed['version']
+
+            # Decode and parse patch content
+            content = data.decode('utf-8', errors='replace')
+
+            # Clear existing patches and import new ones
+            self.iuse_patch_store.clear_patches(category, package, version)
+            count = self.iuse_patch_store.parse_patch_file(content, category, package, version)
+            self._invalidate_package_cache(category, package)
+            logger.info(f"Imported {count} IUSE patches via write to {path}")
 
             return len(data)
 
@@ -2038,6 +2802,7 @@ cache-formats = md5-dict
                 package = parsed['package']
                 version = parsed['version']
                 self.patch_store.clear_patches(category, package, version)
+                self._invalidate_package_cache(category, package)
             return
 
         if parsed['type'] == 'sys_compat_patch_file':
@@ -2051,6 +2816,54 @@ cache-formats = md5-dict
                 package = parsed['package']
                 version = parsed['version']
                 self.compat_patch_store.clear_patches(category, package, version)
+                self._invalidate_package_cache(category, package)
+            return
+
+        if parsed['type'] == 'sys_append_phase':
+            # Support truncate for phase files
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            phase = parsed['phase']
+            # Reject invalid phase names
+            if not is_valid_phase_name(phase):
+                raise FuseOSError(errno.EINVAL)
+
+            if length == 0:
+                # truncate to 0 = remove the phase
+                category = parsed['category']
+                package = parsed['package']
+                version = parsed['version']
+                self.append_patch_store.remove_phase(category, package, version, phase)
+                self._invalidate_package_cache(category, package)
+            return
+
+        if parsed['type'] == 'sys_append_patch_file':
+            # Support truncate for ebuild append patch files
+            if self.append_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            if length == 0:
+                # truncate to 0 = clear all phases
+                category = parsed['category']
+                package = parsed['package']
+                version = parsed['version']
+                self.append_patch_store.clear_phases(category, package, version)
+                self._invalidate_package_cache(category, package)
+            return
+
+        if parsed['type'] == 'sys_iuse_patch_file':
+            # Support truncate for IUSE patch files
+            if self.iuse_patch_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            if length == 0:
+                # truncate to 0 = clear all patches
+                category = parsed['category']
+                package = parsed['package']
+                version = parsed['version']
+                self.iuse_patch_store.clear_patches(category, package, version)
+                self._invalidate_package_cache(category, package)
             return
 
         raise FuseOSError(errno.EROFS)

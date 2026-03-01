@@ -40,6 +40,7 @@ class DependencyPatch:
         old_dep: Original dependency string (for modify/remove)
         new_dep: New dependency string (for add/modify)
         timestamp: Unix timestamp when patch was created
+        dep_type: Type of dependency ('rdepend' or 'depend')
 
     Examples:
         >>> patch = DependencyPatch('modify', '=dev-python/urllib3-1.21', '>=dev-python/urllib3-1.21', 1700000000.0)
@@ -48,11 +49,15 @@ class DependencyPatch:
         >>> patch = DependencyPatch('remove', '=dev-python/unwanted-1.0', None, 1700000000.0)
         >>> patch.new_dep is None
         True
+        >>> patch = DependencyPatch('add', None, 'net-dns/c-ares', 1700000000.0, 'depend')
+        >>> patch.dep_type
+        'depend'
     """
     operation: str  # 'add', 'remove', 'modify'
     old_dep: Optional[str]  # Original dependency (for modify/remove)
     new_dep: Optional[str]  # New dependency (for add/modify)
     timestamp: float  # Unix timestamp
+    dep_type: str = 'rdepend'  # 'rdepend' or 'depend'
 
     def __post_init__(self):
         """Validate the patch operation."""
@@ -64,6 +69,8 @@ class DependencyPatch:
             raise ValueError("Remove operation requires old_dep")
         if self.operation == 'modify' and (self.old_dep is None or self.new_dep is None):
             raise ValueError("Modify operation requires both old_dep and new_dep")
+        if self.dep_type not in ('rdepend', 'depend'):
+            raise ValueError(f"Invalid dep_type: {self.dep_type}")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -72,7 +79,18 @@ class DependencyPatch:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'DependencyPatch':
         """Create from dictionary."""
+        # Handle backward compatibility - old patches don't have dep_type
+        if 'dep_type' not in data:
+            data = dict(data)  # Don't modify original
+            data['dep_type'] = 'rdepend'
         return cls(**data)
+
+    @property
+    def dependency(self) -> Optional[str]:
+        """Get the dependency atom (new_dep for add, old_dep for remove)."""
+        if self.operation == 'add':
+            return self.new_dep
+        return self.old_dep
 
     def to_patch_line(self) -> str:
         """
@@ -265,6 +283,9 @@ class DependencyPatchStore:
         """
         Save patches to JSON file atomically.
 
+        This method preserves existing data in the file (like python_compat_patches,
+        ebuild_appends, iuse_patches) and only updates the patches section.
+
         Returns:
             True if save was successful, False otherwise
 
@@ -284,15 +305,23 @@ class DependencyPatchStore:
             # Ensure directory exists
             self.storage_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # Load existing data to preserve other sections
+            existing_data = {}
+            if self.storage_path.exists():
+                try:
+                    with self.storage_path.open('r', encoding='utf-8') as f:
+                        existing_data = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            # Update with our patches
+            existing_data['version'] = existing_data.get('version', 1)
+            existing_data['patches'] = [pp.to_dict() for pp in self.patches.values()]
+
             # Write to temporary file first
             temp_path = self.storage_path.with_suffix('.tmp')
-            data = {
-                'version': 1,
-                'patches': [pp.to_dict() for pp in self.patches.values()]
-            }
-
             with temp_path.open('w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
+                json.dump(existing_data, f, indent=2)
 
             # Atomic rename
             temp_path.rename(self.storage_path)
@@ -312,7 +341,8 @@ class DependencyPatchStore:
             self.patches[key] = PackagePatches(category, package, version, [])
         return self.patches[key]
 
-    def add_dependency(self, category: str, package: str, version: str, new_dep: str) -> None:
+    def add_dependency(self, category: str, package: str, version: str, new_dep: str,
+                       dep_type: str = 'rdepend') -> None:
         """
         Add a new dependency to a package.
 
@@ -321,6 +351,7 @@ class DependencyPatchStore:
             package: Package name
             version: Version string or '_all'
             new_dep: New dependency atom to add
+            dep_type: Type of dependency ('rdepend' or 'depend')
 
         Examples:
             >>> store = DependencyPatchStore()
@@ -332,12 +363,13 @@ class DependencyPatchStore:
             'add'
         """
         pp = self._get_or_create_patches(category, package, version)
-        patch = DependencyPatch('add', None, new_dep, time.time())
+        patch = DependencyPatch('add', None, new_dep, time.time(), dep_type)
         pp.patches.append(patch)
         self._dirty = True
-        logger.info(f"Added dependency {new_dep} to {category}/{package}/{version}")
+        logger.info(f"Added {dep_type} dependency {new_dep} to {category}/{package}/{version}")
 
-    def remove_dependency(self, category: str, package: str, version: str, old_dep: str) -> None:
+    def remove_dependency(self, category: str, package: str, version: str, old_dep: str,
+                         dep_type: str = 'rdepend') -> None:
         """
         Remove a dependency from a package.
 
@@ -346,6 +378,7 @@ class DependencyPatchStore:
             package: Package name
             version: Version string or '_all'
             old_dep: Dependency atom to remove
+            dep_type: Type of dependency ('rdepend' or 'depend')
 
         Examples:
             >>> store = DependencyPatchStore()
@@ -355,13 +388,13 @@ class DependencyPatchStore:
             'remove'
         """
         pp = self._get_or_create_patches(category, package, version)
-        patch = DependencyPatch('remove', old_dep, None, time.time())
+        patch = DependencyPatch('remove', old_dep, None, time.time(), dep_type)
         pp.patches.append(patch)
         self._dirty = True
-        logger.info(f"Removed dependency {old_dep} from {category}/{package}/{version}")
+        logger.info(f"Removed {dep_type} dependency {old_dep} from {category}/{package}/{version}")
 
     def modify_dependency(self, category: str, package: str, version: str,
-                         old_dep: str, new_dep: str) -> None:
+                         old_dep: str, new_dep: str, dep_type: str = 'rdepend') -> None:
         """
         Modify a dependency version constraint.
 
@@ -371,6 +404,7 @@ class DependencyPatchStore:
             version: Version string or '_all'
             old_dep: Original dependency atom
             new_dep: New dependency atom
+            dep_type: Type of dependency ('rdepend' or 'depend')
 
         Examples:
             >>> store = DependencyPatchStore()
@@ -382,10 +416,10 @@ class DependencyPatchStore:
             'modify'
         """
         pp = self._get_or_create_patches(category, package, version)
-        patch = DependencyPatch('modify', old_dep, new_dep, time.time())
+        patch = DependencyPatch('modify', old_dep, new_dep, time.time(), dep_type)
         pp.patches.append(patch)
         self._dirty = True
-        logger.info(f"Modified dependency {old_dep} -> {new_dep} in {category}/{package}/{version}")
+        logger.info(f"Modified {dep_type} dependency {old_dep} -> {new_dep} in {category}/{package}/{version}")
 
     def get_patches(self, category: str, package: str, version: str) -> List[DependencyPatch]:
         """
@@ -455,7 +489,7 @@ class DependencyPatchStore:
         return sorted(versions)
 
     def apply_patches(self, category: str, package: str, version: str,
-                     deps: List[str]) -> List[str]:
+                     deps: List[str], dep_type: str = 'rdepend') -> List[str]:
         """
         Apply patches to a dependency list.
 
@@ -464,6 +498,7 @@ class DependencyPatchStore:
             package: Package name
             version: Version string
             deps: Original list of dependency atoms
+            dep_type: Type of dependency to filter patches by ('rdepend' or 'depend')
 
         Returns:
             Modified list of dependency atoms
@@ -480,6 +515,11 @@ class DependencyPatchStore:
             True
         """
         patches = self.get_patches(category, package, version)
+        if not patches:
+            return deps
+
+        # Filter patches by dep_type
+        patches = [p for p in patches if p.dep_type == dep_type]
         if not patches:
             return deps
 
