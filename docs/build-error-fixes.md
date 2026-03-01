@@ -8,8 +8,11 @@ When packages fail to build, you can use the `.sys/` virtual filesystem to patch
 |------------|-------------------|
 | Python API incompatibility | `.sys/python-compat/` |
 | Missing/wrong Python version | `.sys/python-compat/` |
-| Dependency version conflict | `.sys/dependencies/` |
-| Missing dependency | `.sys/dependencies/` |
+| Runtime dependency conflict | `.sys/dependencies/` |
+| Missing runtime dependency | `.sys/dependencies/` |
+| Missing build dependency | `.sys/depend/` |
+| Missing USE flags | `.sys/iuse/` |
+| Custom build phase needed | `.sys/ebuild-append/` |
 
 ## Analyzing Build Errors
 
@@ -88,7 +91,159 @@ cat > /var/db/repos/pypi/.sys/python-compat-patch/dev-python/{package}/{version}
 EOF
 ```
 
-## Dependency Patches
+## IUSE Patches (USE Flags)
+
+Use `.sys/iuse/` when a package needs additional USE flags that aren't auto-detected from PyPI metadata.
+
+### Common Symptoms
+
+- Package has optional features that require USE flags
+- Build fails because it expects certain features to be disabled
+- Need to integrate with system libraries instead of bundled ones
+
+### Directory Structure
+
+```
+.sys/iuse/
+    dev-python/
+        {package}/
+            {version}/
+                embed_cares        # USE flag (file = flag exists)
+            _all/
+.sys/iuse-patch/
+    dev-python/
+        {package}/
+            {version}.patch
+            _all.patch
+```
+
+### Patch Format
+
+```
+++ embed_cares        # Add USE flag
+-- test               # Remove USE flag
+```
+
+### Examples
+
+**Add USE flags for gevent to use system libraries:**
+```bash
+# Add USE flags
+touch /var/db/repos/pypi/.sys/iuse/dev-python/gevent/_all/embed_cares
+touch /var/db/repos/pypi/.sys/iuse/dev-python/gevent/_all/embed_libev
+
+# Verify
+ls /var/db/repos/pypi/.sys/iuse/dev-python/gevent/_all/
+cat /var/db/repos/pypi/dev-python/gevent/gevent-25.9.1.ebuild | grep IUSE
+```
+
+**Remove a USE flag:**
+```bash
+rm /var/db/repos/pypi/.sys/iuse/dev-python/gevent/_all/embed_cares
+```
+
+## Ebuild Phase Appending
+
+Use `.sys/ebuild-append/` when you need to add custom code to ebuild phase functions (like `src_configure`, `src_compile`, etc.).
+
+### Common Symptoms
+
+- Package needs environment variables set during build
+- Need to disable bundled libraries and use system versions
+- Custom configure flags required
+- Build system needs workarounds
+
+### Directory Structure
+
+```
+.sys/ebuild-append/
+    dev-python/
+        {package}/
+            {version}/
+                src_configure      # Content appended to src_configure()
+                src_compile        # Content appended to src_compile()
+            _all/
+.sys/ebuild-append-patch/
+    dev-python/
+        {package}/
+            {version}.patch
+            _all.patch
+```
+
+### Supported Phase Functions
+
+| Phase | When It Runs |
+|-------|--------------|
+| `src_configure` | Before configure |
+| `src_compile` | Before compile |
+| `src_install` | Before install |
+| `src_test` | Before tests |
+
+### Examples
+
+**Configure gevent to use system c-ares and libev:**
+```bash
+# Create src_configure with shell redirection
+echo 'export GEVENTSETUP_EMBED_CARES=0' > \
+  /var/db/repos/pypi/.sys/ebuild-append/dev-python/gevent/_all/src_configure
+echo 'export GEVENTSETUP_EMBED_LIBEV=0' >> \
+  /var/db/repos/pypi/.sys/ebuild-append/dev-python/gevent/_all/src_configure
+echo 'distutils-r1_src_configure' >> \
+  /var/db/repos/pypi/.sys/ebuild-append/dev-python/gevent/_all/src_configure
+
+# Verify
+cat /var/db/repos/pypi/.sys/ebuild-append/dev-python/gevent/_all/src_configure
+cat /var/db/repos/pypi/dev-python/gevent/gevent-25.9.1.ebuild | grep -A10 'src_configure'
+```
+
+Note: Use `>` to overwrite and `>>` to append. The append operator works correctly to build up multi-line phase functions.
+
+### Patch File Format
+
+```
+[src_configure]
+export GEVENTSETUP_EMBED_CARES=0
+export GEVENTSETUP_EMBED_LIBEV=0
+distutils-r1_src_configure
+
+[src_compile]
+# Custom compile commands here
+```
+
+## Build-Time Dependencies (DEPEND)
+
+Use `.sys/depend/` when a package needs build-time dependencies (headers, libraries for compilation).
+
+### Common Symptoms
+
+- Compiler errors about missing headers
+- Linker errors about missing libraries
+- Package bundles a library but you want to use the system version
+
+### Directory Structure
+
+```
+.sys/depend/
+    dev-python/
+        {package}/
+            {version}/
+                net-dns::c-ares    # Build-time dependency
+            _all/
+```
+
+### Examples
+
+**Add build dependencies for gevent:**
+```bash
+# gevent needs c-ares and libev headers to build against system libraries
+touch '/var/db/repos/pypi/.sys/depend/dev-python/gevent/_all/net-dns::c-ares'
+touch '/var/db/repos/pypi/.sys/depend/dev-python/gevent/_all/dev-libs::libev'
+
+# Verify
+cat /var/db/repos/pypi/dev-python/gevent/gevent-25.9.1.ebuild | grep -E '^DEPEND='
+```
+
+## Runtime Dependency Patches
 
 Use `.sys/dependencies/` when dependency version constraints cause conflicts.
 
@@ -200,6 +355,70 @@ emerge dev-python/gevent
 ```
 
 **Note:** This is a workaround for packages with bundled native code that doesn't clean build artifacts between Python version builds. The proper upstream fix would be to run `make distclean` or `rm config.cache` between builds.
+
+## Example: Complete gevent Setup with System Libraries
+
+This example shows how to configure gevent to build against system c-ares and libev instead of bundled copies, which avoids the autotools cache conflicts.
+
+### Problem
+
+gevent bundles c-ares and libev, which causes:
+1. Autotools cache conflicts when building for multiple Python versions
+2. Larger package size from bundled libraries
+3. Potential security issues from outdated bundled code
+
+### Solution: Use System Libraries
+
+```bash
+# 1. Add USE flags for the optional features
+touch /var/db/repos/pypi/.sys/iuse/dev-python/gevent/_all/embed_cares
+touch /var/db/repos/pypi/.sys/iuse/dev-python/gevent/_all/embed_libev
+
+# 2. Add build-time dependencies
+touch '/var/db/repos/pypi/.sys/depend/dev-python/gevent/_all/net-dns::c-ares'
+touch '/var/db/repos/pypi/.sys/depend/dev-python/gevent/_all/dev-libs::libev'
+
+# 3. Add runtime dependencies
+touch '/var/db/repos/pypi/.sys/dependencies/dev-python/gevent/_all/net-dns::c-ares'
+touch '/var/db/repos/pypi/.sys/dependencies/dev-python/gevent/_all/dev-libs::libev'
+
+# 4. Configure build to use system libraries
+echo 'export GEVENTSETUP_EMBED_CARES=0' > \
+  /var/db/repos/pypi/.sys/ebuild-append/dev-python/gevent/_all/src_configure
+echo 'export GEVENTSETUP_EMBED_LIBEV=0' >> \
+  /var/db/repos/pypi/.sys/ebuild-append/dev-python/gevent/_all/src_configure
+echo 'distutils-r1_src_configure' >> \
+  /var/db/repos/pypi/.sys/ebuild-append/dev-python/gevent/_all/src_configure
+
+# 5. Verify the generated ebuild
+cat /var/db/repos/pypi/dev-python/gevent/gevent-25.9.1.ebuild
+
+# 6. Install
+emerge dev-python/gevent
+```
+
+### Generated ebuild will contain:
+
+```bash
+IUSE="embed_cares embed_libev"
+
+DEPEND="
+    net-dns/c-ares
+    dev-libs/libev
+"
+
+RDEPEND="
+    net-dns/c-ares
+    dev-libs/libev
+    ...
+"
+
+src_configure() {
+    export GEVENTSETUP_EMBED_CARES=0
+    export GEVENTSETUP_EMBED_LIBEV=0
+    distutils-r1_src_configure
+}
+```
 
 ## Verifying Patches
 

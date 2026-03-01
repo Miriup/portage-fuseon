@@ -17,6 +17,7 @@ This project provides a virtual filesystem that dynamically generates Gentoo ebu
 - **Automatic name translation**: Converts between PyPI and Gentoo package naming conventions
 - **Dependency mapping**: Translates PyPI dependencies to Gentoo atoms
 - **Manifest generation**: Creates Manifest files with checksums from PyPI
+- **Runtime patching**: Modify dependencies, Python compatibility, USE flags, and ebuild phases via `.sys/` virtual filesystem
 
 ## Requirements
 
@@ -256,6 +257,33 @@ The metadata cache is stored in the first writable location:
 4. **Name Translation**: Automatically converts between naming conventions:
    - PyPI: `Pillow`, `scikit-learn`, `ruamel.yaml`
    - Gentoo: `pillow`, `scikit-learn`, `ruamel-yaml`
+
+## Patching and Customization
+
+The `.sys/` virtual filesystem allows runtime modification of generated ebuilds:
+
+| Directory | Purpose |
+|-----------|---------|
+| `.sys/dependencies/` | Modify runtime dependencies (RDEPEND) |
+| `.sys/depend/` | Add build-time dependencies (DEPEND) |
+| `.sys/python-compat/` | Adjust Python version compatibility |
+| `.sys/iuse/` | Add/remove USE flags |
+| `.sys/ebuild-append/` | Add custom phase functions |
+
+### Quick Example: Fix a Package
+
+```bash
+# Remove incompatible Python version
+echo '-- python3_13' > /var/db/repos/pypi/.sys/python-compat-patch/dev-python/oldpkg/_all.patch
+
+# Add missing dependency
+touch '/var/db/repos/pypi/.sys/dependencies/dev-python/broken-pkg/_all/>=dev-python::missing-1.0'
+
+# Add custom src_configure
+echo 'export MY_VAR=1' > /var/db/repos/pypi/.sys/ebuild-append/dev-python/pkg/_all/src_configure
+```
+
+See [docs/build-error-fixes.md](docs/build-error-fixes.md) for comprehensive examples.
 
 ## Repository Structure
 

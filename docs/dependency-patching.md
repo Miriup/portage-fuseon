@@ -265,8 +265,39 @@ patches.json (persisted on shutdown)
 Portage reads ebuild --> _generate_ebuild() --> apply_patches() --> RDEPEND
 ```
 
+## Build-Time Dependencies (DEPEND)
+
+In addition to runtime dependencies (RDEPEND), you can also patch build-time dependencies using `.sys/depend/`:
+
+```
+/var/db/repos/pypi/.sys/
+    depend/
+        dev-python/
+            {package}/
+                {version}/
+                    net-dns::c-ares          # Build-time dependency
+                _all/
+    depend-patch/
+        dev-python/
+            {package}/
+                {version}.patch
+                _all.patch
+```
+
+### Example: Add Build Dependencies for gevent
+
+gevent needs c-ares and libev development headers at build time:
+
+```bash
+# Add build-time dependencies
+touch '/var/db/repos/pypi/.sys/depend/dev-python/gevent/_all/net-dns::c-ares'
+touch '/var/db/repos/pypi/.sys/depend/dev-python/gevent/_all/dev-libs::libev'
+
+# Verify in the ebuild
+cat /var/db/repos/pypi/dev-python/gevent/gevent-25.9.1.ebuild | grep DEPEND
+```
+
 ## Limitations
 
-- Patches only affect RDEPEND and OPTIONAL_DEPEND, not BDEPEND or DEPEND
 - Package names in patches must exactly match the generated atom format
 - USE flag conditions are not directly patchable (add/remove entire atoms instead)
