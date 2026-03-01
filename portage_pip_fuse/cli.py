@@ -359,7 +359,8 @@ RDEPEND="
 "
 
 src_unpack() {{
-\tdie "This is a virtual dependency package for {project_name}, not a real package.\\nInstall the actual {project_name} package from its source."
+\teinfo "This is a stub package that only pulls in dependencies for {project_name}."
+\teinfo "It does not install any files itself."
 }}
 '''
 
