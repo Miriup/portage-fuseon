@@ -1389,22 +1389,30 @@ cache-formats = md5-dict
                 'st_size': 4096,
             })
         elif parsed['type'] in ('sys_deps_dep', 'sys_depend_dep'):
-            # Dependency file in .sys/dependencies/.../version/ or .sys/depend/.../version/
+            # Dependency file in .sys/RDEPEND/.../version/ or .sys/DEPEND/.../version/
             if self.patch_store is None:
                 raise FuseOSError(errno.ENOENT)
-            # Check if this dependency patch actually exists
             category = parsed['category']
             package = parsed['package']
             version = parsed['version']
             dep_name = parsed['dep']
-            dep_type = 'rdepend' if parsed['type'] == 'sys_deps_dep' else 'depend'
 
-            # Get patches and check if this dep exists as an 'add' patch
-            patches = self.patch_store.get_patches(category, package, version)
-            dep_exists = any(
-                p.operation == 'add' and p.new_dep == dep_name and p.dep_type == dep_type
-                for p in patches
-            )
+            if parsed['type'] == 'sys_deps_dep':
+                # RDEPEND - check against original deps + patches
+                pypi_name = self._gentoo_to_pypi(package)
+                if pypi_name:
+                    deps = self._get_package_deps_for_sys(category, package, pypi_name, version)
+                    dep_exists = dep_name in deps
+                else:
+                    dep_exists = False
+            else:
+                # DEPEND - only patches (no original build deps from PyPI)
+                patches = self.patch_store.get_patches(category, package, version)
+                dep_exists = any(
+                    p.operation == 'add' and p.new_dep == dep_name and p.dep_type == 'depend'
+                    for p in patches
+                )
+
             if not dep_exists:
                 raise FuseOSError(errno.ENOENT)
 
@@ -1826,19 +1834,17 @@ cache-formats = md5-dict
                         entries.append('_all')  # Always show _all for global patches
 
             elif parsed['type'] == 'sys_deps_version':
-                # /.sys/dependencies/dev-python/requests/2.31.0 - show dependencies
-                # IMPORTANT: Use cached data only to prevent blocking
+                # /.sys/RDEPEND/dev-python/requests/2.31.0 - show dependencies
                 if self.patch_store is not None:
                     gentoo_name = parsed['package']
                     version = parsed['version']
                     category = parsed['category']
-                    # Show only patched deps (from local patch store) - no network calls
-                    # Original deps would require fetching package info which can block
-                    patches = self.patch_store.get_patches(category, gentoo_name, version)
-                    for patch in patches:
-                        if patch.operation == 'add' and patch.dependency and patch.dep_type == 'rdepend':
-                            entries.append(self._encode_dep_filename(patch.dependency))
-                    # Note: Full dep listing requires 'cat' on a specific dep file
+                    pypi_name = self._gentoo_to_pypi(gentoo_name)
+                    if pypi_name:
+                        # Get current RDEPEND (original + patches applied)
+                        deps = self._get_package_deps_for_sys(category, gentoo_name, pypi_name, version)
+                        for dep in deps:
+                            entries.append(self._encode_dep_filename(dep))
 
             elif parsed['type'] == 'sys_patch':
                 # /.sys/dependencies-patch - show categories
