@@ -29,6 +29,7 @@ from .ebuild_append_patch import EbuildAppendPatchStore, is_valid_phase_name
 from .iuse_patch import IUSEPatchStore, is_valid_use_flag
 from .pep517_patch import PEP517PatchStore, is_valid_pep517_backend, VALID_PEP517_BACKENDS
 from .python_compat_patch import PythonCompatPatchStore
+from .name_translation_patch import NameTranslationPatchStore, is_valid_gentoo_atom
 from .interrupt import InterruptChecker, check_interrupt
 from .prefetcher import create_prefetched_translator
 from .pip_metadata import PyPIMetadataExtractor, EbuildDataExtractor
@@ -169,6 +170,17 @@ class PortagePipFS(Operations):
         else:
             self.pep517_patch_store = None
 
+        # Initialize name translation patch store (uses same file as other patches)
+        if not no_patches:
+            patch_path = patch_file or str(DEFAULT_PATCH_FILE)
+            self.name_translation_store = NameTranslationPatchStore(patch_path, mount_point=mount_point)
+            logger.info(f"Name translation patching enabled, using {self.name_translation_store.storage_path}"
+                       + (f" (mount: {mount_point})" if mount_point else ""))
+            # Pass name translation store to ebuild extractor for RDEPEND generation
+            self.ebuild_extractor.name_translation_store = self.name_translation_store
+        else:
+            self.name_translation_store = None
+
         # Git worktree file content (stored in patches.json under mount point)
         self._git_file_content: Optional[bytes] = None
         if not no_patches:
@@ -210,7 +222,9 @@ class PortagePipFS(Operations):
             "/.sys/pep517",
             "/.sys/pep517/dev-python",
             "/.sys/pep517-patch",
-            "/.sys/pep517-patch/dev-python"
+            "/.sys/pep517-patch/dev-python",
+            # .sys virtual filesystem for manual name translation mappings
+            "/.sys/name-translation"
         }
         
         # Static files
@@ -704,6 +718,16 @@ cache-formats = md5-dict
             # .sys/pep517-default - file containing the default PEP517 backend
             if len(parts) == 2:
                 return {'type': 'sys_pep517_default'}
+            return {'type': 'invalid'}
+
+        elif parts[1] == 'name-translation':
+            # .sys/name-translation/ - manual PyPI-to-Gentoo name mappings
+            if len(parts) == 2:
+                # /.sys/name-translation - directory listing all mapped names
+                return {'type': 'sys_name_translation'}
+            elif len(parts) == 3:
+                # /.sys/name-translation/{pypi_name} - file containing Gentoo atom
+                return {'type': 'sys_name_translation_file', 'pypi_name': parts[2]}
             return {'type': 'invalid'}
 
         elif parts[1] == '.git':
@@ -1389,22 +1413,30 @@ cache-formats = md5-dict
                 'st_size': 4096,
             })
         elif parsed['type'] in ('sys_deps_dep', 'sys_depend_dep'):
-            # Dependency file in .sys/dependencies/.../version/ or .sys/depend/.../version/
+            # Dependency file in .sys/RDEPEND/.../version/ or .sys/DEPEND/.../version/
             if self.patch_store is None:
                 raise FuseOSError(errno.ENOENT)
-            # Check if this dependency patch actually exists
             category = parsed['category']
             package = parsed['package']
             version = parsed['version']
             dep_name = parsed['dep']
-            dep_type = 'rdepend' if parsed['type'] == 'sys_deps_dep' else 'depend'
 
-            # Get patches and check if this dep exists as an 'add' patch
-            patches = self.patch_store.get_patches(category, package, version)
-            dep_exists = any(
-                p.operation == 'add' and p.new_dep == dep_name and p.dep_type == dep_type
-                for p in patches
-            )
+            if parsed['type'] == 'sys_deps_dep':
+                # RDEPEND - check against original deps + patches
+                pypi_name = self._gentoo_to_pypi(package)
+                if pypi_name:
+                    deps = self._get_package_deps_for_sys(category, package, pypi_name, version)
+                    dep_exists = dep_name in deps
+                else:
+                    dep_exists = False
+            else:
+                # DEPEND - only patches (no original build deps from PyPI)
+                patches = self.patch_store.get_patches(category, package, version)
+                dep_exists = any(
+                    p.operation == 'add' and p.new_dep == dep_name and p.dep_type == 'depend'
+                    for p in patches
+                )
+
             if not dep_exists:
                 raise FuseOSError(errno.ENOENT)
 
@@ -1664,6 +1696,33 @@ cache-formats = md5-dict
                 'st_nlink': 1,
                 'st_size': len(default.encode('utf-8')) + 1,  # +1 for newline
             })
+        elif parsed['type'] == 'sys_name_translation':
+            # /.sys/name-translation - directory listing all mapped names
+            if self.name_translation_store is None:
+                raise FuseOSError(errno.ENOENT)
+            attrs.update({
+                'st_mode': stat.S_IFDIR | 0o755,
+                'st_nlink': 2,
+            })
+        elif parsed['type'] == 'sys_name_translation_file':
+            # /.sys/name-translation/{pypi_name} - file containing Gentoo atom
+            if self.name_translation_store is None:
+                raise FuseOSError(errno.ENOENT)
+            pypi_name = parsed['pypi_name']
+            gentoo_atom = self.name_translation_store.get_mapping(pypi_name)
+            if gentoo_atom is None:
+                # File doesn't exist yet - return size 0 to allow creation
+                attrs.update({
+                    'st_mode': stat.S_IFREG | 0o644,
+                    'st_nlink': 1,
+                    'st_size': 0,
+                })
+            else:
+                attrs.update({
+                    'st_mode': stat.S_IFREG | 0o644,
+                    'st_nlink': 1,
+                    'st_size': len(gentoo_atom.encode('utf-8')) + 1,  # +1 for newline
+                })
         # Handle .sys/.git worktree file
         elif parsed['type'] == 'sys_git_file':
             content = self._get_git_file_content()
@@ -1798,6 +1857,8 @@ cache-formats = md5-dict
                     entries.extend(['iuse', 'iuse-patch'])
                 if self.pep517_patch_store is not None:
                     entries.extend(['pep517', 'pep517-patch', 'pep517-default'])
+                if self.name_translation_store is not None:
+                    entries.append('name-translation')
                 # Show .git file if it exists (for git worktree support)
                 if self._get_git_file_content() is not None:
                     entries.append('.git')
@@ -1838,19 +1899,17 @@ cache-formats = md5-dict
                         entries.append('_all')  # Always show _all for global patches
 
             elif parsed['type'] == 'sys_deps_version':
-                # /.sys/dependencies/dev-python/requests/2.31.0 - show dependencies
-                # IMPORTANT: Use cached data only to prevent blocking
+                # /.sys/RDEPEND/dev-python/requests/2.31.0 - show dependencies
                 if self.patch_store is not None:
                     gentoo_name = parsed['package']
                     version = parsed['version']
                     category = parsed['category']
-                    # Show only patched deps (from local patch store) - no network calls
-                    # Original deps would require fetching package info which can block
-                    patches = self.patch_store.get_patches(category, gentoo_name, version)
-                    for patch in patches:
-                        if patch.operation == 'add' and patch.dependency and patch.dep_type == 'rdepend':
-                            entries.append(self._encode_dep_filename(patch.dependency))
-                    # Note: Full dep listing requires 'cat' on a specific dep file
+                    pypi_name = self._gentoo_to_pypi(gentoo_name)
+                    if pypi_name:
+                        # Get current RDEPEND (original + patches applied)
+                        deps = self._get_package_deps_for_sys(category, gentoo_name, pypi_name, version)
+                        for dep in deps:
+                            entries.append(self._encode_dep_filename(dep))
 
             elif parsed['type'] == 'sys_patch':
                 # /.sys/dependencies-patch - show categories
@@ -2178,6 +2237,11 @@ cache-formats = md5-dict
                     for ver in versions:
                         entries.append(f"{ver}.patch")
 
+            elif parsed['type'] == 'sys_name_translation':
+                # /.sys/name-translation - list all mapped PyPI names
+                if self.name_translation_store is not None:
+                    entries.extend(self.name_translation_store.list_mappings())
+
         except InterruptedError:
             logger.info(f"readdir interrupted for {path}")
             # Return minimal result on interrupt
@@ -2311,6 +2375,18 @@ cache-formats = md5-dict
             content = (default + '\n').encode('utf-8')
             return content[offset:offset + length]
 
+        elif parsed['type'] == 'sys_name_translation_file':
+            # Read name translation mapping: cat /.sys/name-translation/torch
+            if self.name_translation_store is None:
+                raise FuseOSError(errno.ENOENT)
+            pypi_name = parsed['pypi_name']
+            gentoo_atom = self.name_translation_store.get_mapping(pypi_name)
+            if gentoo_atom is None:
+                # No mapping yet - return empty content
+                return b''
+            content = (gentoo_atom + '\n').encode('utf-8')
+            return content[offset:offset + length]
+
         # Handle .sys/.git file read
         elif parsed['type'] == 'sys_git_file':
             content = self._get_git_file_content()
@@ -2362,7 +2438,7 @@ cache-formats = md5-dict
                                   'sys_compat_impl', 'sys_compat_patch_file',
                                   'sys_append_patch_file', 'sys_iuse_patch_file',
                                   'sys_pep517_version', 'sys_pep517_patch_file',
-                                  'sys_pep517_default']:
+                                  'sys_pep517_default', 'sys_name_translation_file']:
             # Allow opening .sys files
             return 0
         elif parsed['type'] == 'sys_append_phase':
@@ -2804,6 +2880,13 @@ cache-formats = md5-dict
             else:
                 logger.error("Failed to save PEP517 patches!")
 
+        if self.name_translation_store is not None and self.name_translation_store.is_dirty:
+            logger.info("Saving name translation mappings...")
+            if self.name_translation_store.save():
+                logger.info(f"Name translation mappings saved to {self.name_translation_store.storage_path}")
+            else:
+                logger.error("Failed to save name translation mappings!")
+
         # Close the extractor properly
         if hasattr(self.pypi_extractor, 'close'):
             self.pypi_extractor.close()
@@ -3026,6 +3109,14 @@ cache-formats = md5-dict
             # Just allow creation - actual content set via write()
             return 0
 
+        if parsed['type'] == 'sys_name_translation_file':
+            # touch /.sys/name-translation/torch
+            # Creates a name translation file - content will be set via write()
+            if self.name_translation_store is None:
+                raise FuseOSError(errno.EROFS)
+            # Just allow creation - actual content set via write()
+            return 0
+
         raise FuseOSError(errno.EROFS)
 
     def unlink(self, path):
@@ -3136,6 +3227,17 @@ cache-formats = md5-dict
             self.pep517_patch_store.remove_backend(category, package, version)
             self._invalidate_package_cache(category, package)
             logger.info(f"Removed PEP517 backend via rm: from {category}/{package}/{version}")
+            return
+
+        if parsed['type'] == 'sys_name_translation_file':
+            # rm /.sys/name-translation/torch
+            if self.name_translation_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            pypi_name = parsed['pypi_name']
+            if not self.name_translation_store.remove_mapping(pypi_name):
+                raise FuseOSError(errno.ENOENT)
+            logger.info(f"Removed name translation mapping via rm: {pypi_name}")
             return
 
         raise FuseOSError(errno.EROFS)
@@ -3355,6 +3457,25 @@ cache-formats = md5-dict
 
             return len(data)
 
+        if parsed['type'] == 'sys_name_translation_file':
+            # echo "sci-ml/pytorch" > /.sys/name-translation/torch
+            if self.name_translation_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            pypi_name = parsed['pypi_name']
+            # Decode and validate Gentoo atom
+            gentoo_atom = data.decode('utf-8', errors='replace').strip()
+            if not is_valid_gentoo_atom(gentoo_atom):
+                logger.warning(f"Invalid Gentoo atom: {gentoo_atom}. Expected format: category/package (e.g., 'sci-ml/pytorch')")
+                raise FuseOSError(errno.EINVAL)
+
+            self.name_translation_store.set_mapping(pypi_name, gentoo_atom)
+            # Invalidate all cached ebuilds since name translations affect RDEPEND
+            self._content_cache.clear()
+            logger.info(f"Set name translation: {pypi_name} -> {gentoo_atom}")
+
+            return len(data)
+
         raise FuseOSError(errno.EROFS)
 
     def truncate(self, path, length, fh=None):
@@ -3480,6 +3601,19 @@ cache-formats = md5-dict
                 # truncate to 0 = clear default (reverts to 'setuptools')
                 self.pep517_patch_store.clear_default_backend()
                 # Invalidate all cached ebuilds since default affects all packages
+                self._content_cache.clear()
+            return
+
+        if parsed['type'] == 'sys_name_translation_file':
+            # Support truncate for name translation files
+            if self.name_translation_store is None:
+                raise FuseOSError(errno.EROFS)
+
+            if length == 0:
+                # truncate to 0 = remove the mapping
+                pypi_name = parsed['pypi_name']
+                self.name_translation_store.remove_mapping(pypi_name)
+                # Invalidate all cached ebuilds since name translations affect RDEPEND
                 self._content_cache.clear()
             return
 

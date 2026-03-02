@@ -1008,14 +1008,17 @@ class EbuildDataExtractor:
     _cache_timestamp = 0
     _cache_ttl = 3600  # Cache for 1 hour
     
-    def __init__(self, cache_dir: Optional[str] = None):
+    def __init__(self, cache_dir: Optional[str] = None, name_translation_store=None):
         """Initialize the ebuild data extractor.
 
         Args:
             cache_dir: Directory for caching PyPI metadata
+            name_translation_store: Optional NameTranslationPatchStore for custom
+                PyPI-to-Gentoo package name mappings (e.g., torch -> sci-ml/pytorch)
         """
         self.pypi_extractor = PyPIMetadataExtractor(cache_dir=cache_dir)
-        
+        self.name_translation_store = name_translation_store
+
         # PyPI to Gentoo license mapping
         self.license_map = {
             'MIT': 'MIT',
@@ -1043,7 +1046,35 @@ class EbuildDataExtractor:
             'CC0-1.0': 'CC0-1.0',
             'Unlicense': 'Unlicense',
         }
-    
+
+    def _get_gentoo_atom(self, pypi_name: str, gentoo_name: str) -> str:
+        """
+        Get the full Gentoo atom (category/package) for a PyPI package.
+
+        Checks for custom name translation mappings first, then falls back
+        to the default dev-python category.
+
+        Args:
+            pypi_name: Original PyPI package name (for lookup in name_translation_store)
+            gentoo_name: Translated Gentoo package name (used as fallback)
+
+        Returns:
+            Full Gentoo atom like 'sci-ml/pytorch' or 'dev-python/requests'
+
+        Examples:
+            >>> extractor = EbuildDataExtractor()
+            >>> extractor._get_gentoo_atom('requests', 'requests')
+            'dev-python/requests'
+        """
+        # Check for custom mapping
+        if self.name_translation_store is not None:
+            custom_atom = self.name_translation_store.get_mapping(pypi_name)
+            if custom_atom:
+                return custom_atom
+
+        # Default to dev-python category
+        return f"dev-python/{gentoo_name}"
+
     @classmethod
     def _get_valid_python_impls(cls) -> Set[str]:
         """
@@ -1430,15 +1461,17 @@ class EbuildDataExtractor:
 
         for package_name, dep_entries in package_deps.items():
             gentoo_name = dep_entries[0][2]  # All entries have the same gentoo_name
+            # Get full Gentoo atom (may use custom mapping like sci-ml/pytorch for torch)
+            gentoo_atom = self._get_gentoo_atom(package_name, gentoo_name)
 
             # Build a map: python_version -> gentoo_dep_string
             version_to_dep: Dict[str, str] = {}
 
             for specifiers, marker, _ in dep_entries:
                 if specifiers:
-                    gentoo_dep = self._format_gentoo_dependency(gentoo_name, specifiers)
+                    gentoo_dep = self._format_gentoo_dependency(gentoo_atom, specifiers)
                 else:
-                    gentoo_dep = f"dev-python/{gentoo_name}"
+                    gentoo_dep = gentoo_atom
 
                 # Determine which Python versions this applies to
                 for py_ver in supported_versions:
@@ -1544,12 +1577,13 @@ class EbuildDataExtractor:
                     package_name = match.group(1) if match else base_req.split()[0]
                     specifiers = None
             
-            # Translate to Gentoo name and add version specifiers
+            # Translate to Gentoo name and get full atom (may use custom mapping)
             gentoo_name = default_translator.pypi_to_gentoo(package_name)
+            gentoo_atom = self._get_gentoo_atom(package_name, gentoo_name)
             if specifiers:
-                gentoo_dep = self._format_gentoo_dependency(gentoo_name, specifiers)
+                gentoo_dep = self._format_gentoo_dependency(gentoo_atom, specifiers)
             else:
-                gentoo_dep = f"dev-python/{gentoo_name}"
+                gentoo_dep = gentoo_atom
 
             # Add PYTHON_USEDEP to ensure deps are built for same Python targets
             gentoo_dep = self._add_python_usedep(gentoo_dep)
@@ -1729,17 +1763,17 @@ class EbuildDataExtractor:
             # No trailing .0 - return with it (1.33 -> 1.33.0)
             return version + '.0'
 
-    def _format_gentoo_dependency(self, gentoo_name: str, specifiers) -> str:
+    def _format_gentoo_dependency(self, gentoo_atom: str, specifiers) -> str:
         """
         Format a Gentoo dependency string with version specifiers.
-        
+
         Args:
-            gentoo_name: The Gentoo package name
+            gentoo_atom: The full Gentoo atom (e.g., 'dev-python/requests' or 'sci-ml/pytorch')
             specifiers: Packaging specifiers from Requirement object
-            
+
         Returns:
             Formatted Gentoo dependency string
-            
+
         Examples:
             >>> extractor = EbuildDataExtractor()
             >>> # Test by parsing actual requirement strings
@@ -1749,69 +1783,73 @@ class EbuildDataExtractor:
             ...     from packaging.requirements import Requirement
             >>> # Test ~= compatible release operator (PEP 440)
             >>> req = Requirement('requests~=1.4')
-            >>> result = extractor._format_gentoo_dependency('requests', req.specifier)
+            >>> result = extractor._format_gentoo_dependency('dev-python/requests', req.specifier)
             >>> '>=dev-python/requests-1.4' in result
             True
             >>> '<dev-python/requests-2' in result
             True
             >>> # Test ~= with patch version
             >>> req = Requirement('requests~=1.4.2')
-            >>> result = extractor._format_gentoo_dependency('requests', req.specifier)
+            >>> result = extractor._format_gentoo_dependency('dev-python/requests', req.specifier)
             >>> '>=dev-python/requests-1.4.2' in result
             True
             >>> '<dev-python/requests-1.5' in result
             True
             >>> # Test simple >= operator
             >>> req = Requirement('requests>=2.0.0')
-            >>> extractor._format_gentoo_dependency('requests', req.specifier)
+            >>> extractor._format_gentoo_dependency('dev-python/requests', req.specifier)
             '>=dev-python/requests-2.0.0'
+            >>> # Test with custom category
+            >>> req = Requirement('torch>=2.0')
+            >>> extractor._format_gentoo_dependency('sci-ml/pytorch', req.specifier)
+            '>=sci-ml/pytorch-2.0'
         """
         if not specifiers:
-            return f"dev-python/{gentoo_name}"
+            return gentoo_atom
 
         # Convert PyPI version specifiers to Gentoo format
         dep_parts = []
         for spec in specifiers:
             operator = spec.operator
             version = self._translate_pypi_version(spec.version)
-            
+
             # Translate operators to Gentoo format
             if operator == '==':
                 # Handle wildcard versions: PyPI ==23.* -> Gentoo =pkg-23*
                 if version.endswith('.*'):
                     version = version[:-2] + '*'  # Remove .* and add *
-                    dep_parts.append(f"=dev-python/{gentoo_name}-{version}")
+                    dep_parts.append(f"={gentoo_atom}-{version}")
                 else:
                     # PEP 440 considers 1.33 == 1.33.0, but Gentoo doesn't
                     # Generate || ( =pkg-1.33 =pkg-1.33.0 ) to match either
                     alt_version = self._get_pep440_equivalent_version(version)
                     if alt_version:
-                        dep_parts.append(f"|| ( =dev-python/{gentoo_name}-{version} =dev-python/{gentoo_name}-{alt_version} )")
+                        dep_parts.append(f"|| ( ={gentoo_atom}-{version} ={gentoo_atom}-{alt_version} )")
                     else:
-                        dep_parts.append(f"=dev-python/{gentoo_name}-{version}")
+                        dep_parts.append(f"={gentoo_atom}-{version}")
             elif operator == '>=':
                 # Normalize to shortest form so >=1.33.0 matches version 1.33
                 # (In Gentoo 1.33 < 1.33.0, but in PEP 440 they're equal)
                 norm_version = self._normalize_version_shortest(version)
-                dep_parts.append(f">=dev-python/{gentoo_name}-{norm_version}")
+                dep_parts.append(f">={gentoo_atom}-{norm_version}")
             elif operator == '>':
                 # Keep original - >1.33.0 correctly excludes both 1.33 and 1.33.0 in Gentoo
-                dep_parts.append(f">dev-python/{gentoo_name}-{version}")
+                dep_parts.append(f">{gentoo_atom}-{version}")
             elif operator == '<=':
                 # Use longest form so <=1.33 also includes 1.33.0
                 norm_version = self._normalize_version_longest(version)
-                dep_parts.append(f"<=dev-python/{gentoo_name}-{norm_version}")
+                dep_parts.append(f"<={gentoo_atom}-{norm_version}")
             elif operator == '<':
                 # Normalize to shortest form so <1.33.0 excludes 1.33 too
                 # (In PEP 440, 1.33 == 1.33.0, so <1.33.0 should exclude 1.33)
                 norm_version = self._normalize_version_shortest(version)
-                dep_parts.append(f"<dev-python/{gentoo_name}-{norm_version}")
+                dep_parts.append(f"<{gentoo_atom}-{norm_version}")
             elif operator == '!=':
                 # Handle wildcard versions: PyPI !=9.2.* -> Gentoo !=pkg-9.2*
                 # Note: Gentoo uses != for versioned blocks, ! is only for unversioned
                 if version.endswith('.*'):
                     version = version[:-2] + '*'  # Remove .* and add *
-                dep_parts.append(f"!=dev-python/{gentoo_name}-{version}")
+                dep_parts.append(f"!={gentoo_atom}-{version}")
             elif operator == '~=':
                 # Compatible release per PEP 440: ~=1.4 means >=1.4, ==1.*
                 # ~=1.4.5 means >=1.4.5, ==1.4.*
@@ -1824,15 +1862,15 @@ class EbuildDataExtractor:
                         # Increment the last remaining segment
                         upper_parts[-1] = str(int(upper_parts[-1]) + 1)
                         upper_version = '.'.join(upper_parts)
-                        dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
-                        dep_parts.append(f"<dev-python/{gentoo_name}-{upper_version}")
+                        dep_parts.append(f">={gentoo_atom}-{version}")
+                        dep_parts.append(f"<{gentoo_atom}-{upper_version}")
                     except ValueError:
                         # If conversion fails, fall back to just >=
-                        dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
+                        dep_parts.append(f">={gentoo_atom}-{version}")
                 else:
                     # Single segment - not valid per PEP 440, but handle gracefully
-                    dep_parts.append(f">=dev-python/{gentoo_name}-{version}")
-        
+                    dep_parts.append(f">={gentoo_atom}-{version}")
+
         # For multiple specifiers, we need to use Gentoo's syntax
         if len(dep_parts) == 1:
             return dep_parts[0]
