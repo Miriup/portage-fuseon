@@ -1081,8 +1081,8 @@ def install_command():
     install_parser.add_argument(
         '--priority',
         type=int,
-        default=50,
-        help='Repository priority (default: 50)'
+        default=-50,
+        help='Repository priority (default: -50, lower than gentoo to act as fallback)'
     )
 
     # Remove 'install' from argv and parse remaining args

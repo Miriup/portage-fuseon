@@ -325,7 +325,7 @@ The `install` command creates `/etc/portage/repos.conf/portage-pip-fuse.conf`:
 location = /var/db/repos/pypi
 sync-type =
 auto-sync = no
-priority = 50
+priority = -50
 ```
 
 ### Environment
