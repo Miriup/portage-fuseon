@@ -18,9 +18,12 @@ This document outlines the coding style and development practices for the portag
 
 ## Key Design Decisions
 
-### Default Filters  
+### Default Filters
 The following filters MUST work properly by default:
-1. **source-dist**: Filters packages to those with source distributions (required for Gentoo's build-from-source philosophy)
+1. **source-dist**: Filters packages to those with source distributions OR git repositories (required for Gentoo's build-from-source philosophy)
+   - Prefers sdist when available
+   - Falls back to git-r3 when package has a git repository URL but no sdist
+   - Falls back to wheel only as last resort
 2. **python-compat**: MUST be implemented efficiently to filter packages by system PYTHON_TARGETS
    - Current implementation needs work - checking all 746k packages is impractical
    - Should work on cached/indexed packages or use a more efficient approach
@@ -273,7 +276,10 @@ portage_pip_fuse/
 ├── version_filter.py    # Version filtering (source-dist, python-compat)
 ├── package_filter.py    # Package filtering (deps, recent, etc.)
 ├── constants.py         # Configuration constants
-└── prefetcher.py        # Repository scanning utilities
+├── prefetcher.py        # Repository scanning utilities
+├── source_provider.py   # Source provider abstraction (sdist, git, wheel)
+├── git_provider.py      # Git URL detection and normalization
+└── git_source_patch.py  # Git source configuration patches
 ```
 
 ## CLI Architecture
@@ -317,6 +323,93 @@ The `pip` subcommand (`pip_command()`) translates pip install syntax to emerge:
 
 **Extras handling:**
 Package extras (`requests[security]`) are reported as USE flag requirements that users should add to `/etc/portage/package.use`.
+
+## Git-based Source Support
+
+When a PyPI package has no source distribution (sdist) but has a known git repository URL, the system can generate ebuilds using `git-r3.eclass` instead.
+
+### Source Provider Priority
+
+The system uses a provider chain with the following priority order:
+1. **sdist (priority 100)**: Source distribution - preferred, uses `pypi.eclass`
+2. **git (priority 75)**: Git repository - fallback, uses `git-r3.eclass`
+3. **wheel (priority 50)**: Pure-Python wheel - last resort, extracts wheel archive
+
+### Git URL Detection
+
+Git repository URLs are extracted from PyPI `project_urls` metadata in this order:
+1. `Repository` key
+2. `Source` / `Source Code` key
+3. `GitHub` / `GitLab` key
+4. `Homepage` (only if it matches a known git host)
+
+**Supported git hosts:** GitHub, GitLab, Codeberg, Bitbucket, SourceHut, GitLab instances (gnome.org, freedesktop.org)
+
+### Git URL Normalization
+
+URLs are normalized for use with `git-r3.eclass`:
+- `/tree/main`, `/blob/main/file`, `/-/tree/main` suffixes are removed
+- SSH URLs (`git@github.com:user/repo`) are converted to HTTPS
+- `.git` suffix is added if missing (for GitHub/GitLab)
+
+### Git-based Ebuild Structure
+
+```bash
+EAPI=8
+
+DISTUTILS_USE_PEP517=setuptools
+PYTHON_COMPAT=( python3_11 python3_12 python3_13 )
+
+EGIT_REPO_URI="https://github.com/user/repo.git"
+EGIT_COMMIT="v${PV}"
+
+inherit distutils-r1 git-r3
+
+DESCRIPTION="Package description"
+HOMEPAGE="https://pypi.org/project/example"
+
+LICENSE="MIT"
+SLOT="0"
+# Live ebuild from git - no keywords
+KEYWORDS=""
+```
+
+### CLI Flags
+
+```bash
+portage-pip-fuse mount --no-git-source        # Disable git repository detection
+portage-pip-fuse mount --git-tag-pattern STR  # Default tag pattern (default: v${PV})
+```
+
+### Manual Git Source Configuration
+
+Use the `.sys/git-source/` virtual filesystem to manually configure git sources:
+
+```bash
+# Enable git source for all versions of a package
+echo "== git" > /var/db/repos/pypi/.sys/git-source/dev-python/faster-whisper/_all
+
+# Enable with custom URL
+echo "== git https://github.com/custom/repo.git" > /var/db/repos/pypi/.sys/git-source/dev-python/faster-whisper/_all
+
+# Enable with custom URL and tag pattern
+echo "== git https://github.com/custom/repo.git release-{version}" > /var/db/repos/pypi/.sys/git-source/dev-python/faster-whisper/_all
+
+# Force wheel fallback (disable git for this package)
+echo "== wheel" > /var/db/repos/pypi/.sys/git-source/dev-python/some-package/_all
+```
+
+### Version Filter Integration
+
+The `source-dist` version filter includes packages with git repositories by default:
+
+```python
+# Include both sdist and git sources (default)
+filter = VersionFilterSourceDist(include_git=True)
+
+# Only include packages with sdist
+filter = VersionFilterSourceDist(include_git=False)
+```
 
 ## Performance Considerations
 

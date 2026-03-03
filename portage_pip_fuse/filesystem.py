@@ -30,6 +30,7 @@ from .iuse_patch import IUSEPatchStore, is_valid_use_flag
 from .pep517_patch import PEP517PatchStore, is_valid_pep517_backend, VALID_PEP517_BACKENDS
 from .python_compat_patch import PythonCompatPatchStore
 from .name_translation_patch import NameTranslationPatchStore, is_valid_gentoo_atom
+from .git_source_patch import GitSourcePatchStore
 from .interrupt import InterruptChecker, check_interrupt
 from .prefetcher import create_prefetched_translator
 from .pip_metadata import PyPIMetadataExtractor, EbuildDataExtractor
@@ -80,7 +81,8 @@ class PortagePipFS(Operations):
     
     def __init__(self, root: str = "/", cache_ttl: int = 3600, cache_dir: Optional[str] = None,
                  filter_config: Optional[Dict] = None, patch_file: Optional[str] = None,
-                 no_patches: bool = False, mount_point: Optional[str] = None):
+                 no_patches: bool = False, mount_point: Optional[str] = None,
+                 enable_git_source: bool = True, git_tag_pattern: str = 'v${PV}'):
         """
         Initialize the FUSE filesystem.
 
@@ -92,11 +94,15 @@ class PortagePipFS(Operations):
             patch_file: Path to dependency patch file (default: ~/.cache/portage-pip-fuse/patches.json)
             no_patches: If True, disable the dependency patching system entirely
             mount_point: Mount point path for namespaced configuration
+            enable_git_source: If True, detect git repos for wheel-only packages (default: True)
+            git_tag_pattern: Default git tag pattern for version mapping (default: v${PV})
         """
         self.root = root
         self.cache_ttl = cache_ttl
         self.no_patches = no_patches
         self.mount_point = mount_point
+        self.enable_git_source = enable_git_source
+        self.git_tag_pattern = git_tag_pattern
         
         # Content cache: path -> (content, timestamp)
         self._content_cache: Dict[str, Tuple[bytes, float]] = {}
@@ -181,6 +187,17 @@ class PortagePipFS(Operations):
         else:
             self.name_translation_store = None
 
+        # Initialize git source patch store (uses same file as other patches)
+        if not no_patches and enable_git_source:
+            patch_path = patch_file or str(DEFAULT_PATCH_FILE)
+            self.git_source_patch_store = GitSourcePatchStore(patch_path, mount_point=mount_point)
+            logger.info(f"Git source patching enabled, using {self.git_source_patch_store.storage_path}"
+                       + (f" (mount: {mount_point})" if mount_point else ""))
+        else:
+            self.git_source_patch_store = None
+            if not enable_git_source:
+                logger.info("Git source detection disabled")
+
         # Git worktree file content (stored in patches.json under mount point)
         self._git_file_content: Optional[bytes] = None
         if not no_patches:
@@ -224,7 +241,12 @@ class PortagePipFS(Operations):
             "/.sys/pep517-patch",
             "/.sys/pep517-patch/dev-python",
             # .sys virtual filesystem for manual name translation mappings
-            "/.sys/name-translation"
+            "/.sys/name-translation",
+            # .sys virtual filesystem for git source configuration
+            "/.sys/git-source",
+            "/.sys/git-source/dev-python",
+            "/.sys/git-source-patch",
+            "/.sys/git-source-patch/dev-python"
         }
         
         # Static files
@@ -1095,6 +1117,8 @@ cache-formats = md5-dict
                         'requires_python': version_requires_python,
                         # Note: classifiers are not available per-version in bulk JSON,
                         # so we don't include them - requires_python is authoritative
+                        # Include project_urls for git repository detection
+                        'project_urls': json_data.get('info', {}).get('project_urls', {}),
                     }
 
                     versions_metadata[version] = {
@@ -2616,10 +2640,13 @@ cache-formats = md5-dict
                        package: str = '', version: str = '') -> str:
         """Format ebuild data into ebuild file content.
 
-        Handles both sdist-based and wheel-based ebuilds. Wheel-based ebuilds
-        are generated when a package has no sdist but has a pure-Python wheel.
+        Handles sdist-based, git-based, and wheel-based ebuilds:
+        - sdist: Uses pypi.eclass for source distributions
+        - git: Uses git-r3.eclass when no sdist but git repo available
+        - wheel: Falls back to extracting pure-Python wheels
         """
         use_wheel = data.get('use_wheel', False)
+        use_git = data.get('use_git', False)
         python_compat = ' '.join(data.get('PYTHON_COMPAT', ['python3_11', 'python3_12', 'python3_13']))
 
         ebuild_lines = [
@@ -2630,21 +2657,55 @@ cache-formats = md5-dict
             f"",
         ]
 
-        if use_wheel:
-            # Wheel-based ebuild - no pypi eclass, explicit SRC_URI
-            wheel_filename = data.get('wheel_filename', '')
-            wheel_url = data.get('SRC_URI', '')
+        if use_git:
+            # Git-based ebuild - use git-r3 eclass instead of pypi
+            # This takes precedence over wheel when a git repo is available
+            # Get PEP517 backend - check patches first, then configurable default
+            pep517_backend = None
+            if self.pep517_patch_store is not None and package and version:
+                pep517_backend = self.pep517_patch_store.get_backend(category, package, version)
+            if pep517_backend is None:
+                # Use configurable default (falls back to 'setuptools')
+                if self.pep517_patch_store is not None:
+                    pep517_backend = self.pep517_patch_store.get_default_backend()
+                else:
+                    pep517_backend = 'setuptools'
+
+            git_repo_uri = data.get('git_repo_uri', '')
+            git_commit = data.get('git_commit', 'v${PV}')
 
             ebuild_lines.extend([
+                f"DISTUTILS_USE_PEP517={pep517_backend}",
                 f"PYTHON_COMPAT=( {python_compat} )",
                 f"",
-                f"inherit python-r1",
+                f"EGIT_REPO_URI=\"{git_repo_uri}\"",
+                f"EGIT_COMMIT=\"{git_commit}\"",
+                f"",
+                f"inherit distutils-r1 git-r3",
                 f"",
                 f"DESCRIPTION=\"{self._escape_double_quotes(data.get('DESCRIPTION', 'Python package from PyPI'))}\"",
                 f"HOMEPAGE=\"{data.get('HOMEPAGE', 'https://pypi.org/project/' + data.get('PN', ''))}\"",
                 f"",
-                f"# Wheel archive - renamed to .zip for extraction",
-                f"SRC_URI=\"{wheel_url}\"",
+                f"LICENSE=\"{data.get('LICENSE', 'unknown')}\"",
+                f"SLOT=\"{data.get('SLOT', '0')}\"",
+                f"KEYWORDS=\"{data.get('KEYWORDS', '~amd64 ~x86')}\"",
+            ])
+        elif use_wheel:
+            # Wheel-based ebuild - use pypi_wheel_url for SRC_URI
+            # Only used when no sdist AND no git repo available
+            ebuild_lines.extend([
+                f"PYTHON_COMPAT=( {python_compat} )",
+                f"",
+                f"# PYPI_PN must be set before inherit for pypi_wheel_url",
+                f"PYPI_PN=\"{data.get('PYPI_PN', data.get('PN', ''))}\"",
+                f"",
+                f"inherit python-r1 pypi",
+                f"",
+                f"DESCRIPTION=\"{self._escape_double_quotes(data.get('DESCRIPTION', 'Python package from PyPI'))}\"",
+                f"HOMEPAGE=\"{data.get('HOMEPAGE', 'https://pypi.org/project/' + data.get('PN', ''))}\"",
+                f"",
+                f"# Wheel unpacked via pypi.eclass (adds .zip suffix for portage)",
+                f"SRC_URI=\"$(pypi_wheel_url --unpack)\"",
                 f"S=\"${{WORKDIR}}\"",
                 f"",
                 f"LICENSE=\"{data.get('LICENSE', 'unknown')}\"",
@@ -2689,7 +2750,7 @@ cache-formats = md5-dict
             ebuild_lines.append(f"IUSE=\"{' '.join(data['IUSE'])}\"")
 
         # Add BDEPEND for wheel-based ebuilds (need unzip)
-        if use_wheel:
+        if use_wheel and not use_git:
             ebuild_lines.append(f"")
             ebuild_lines.append(f"BDEPEND=\"")
             ebuild_lines.append(f"\tapp-arch/unzip")
@@ -2707,12 +2768,12 @@ cache-formats = md5-dict
             ebuild_lines.append(f"")
             rdepend_var = "RDEPEND" if not use_wheel else "RDEPEND"
             ebuild_lines.append(f"{rdepend_var}=\"")
-            if use_wheel:
+            if use_wheel and not use_git:
                 ebuild_lines.append(f"\t${{PYTHON_DEPS}}")
             for dep in data['RDEPEND']:
                 ebuild_lines.append(f"\t{dep}")
             ebuild_lines.append(f"\"")
-        elif use_wheel:
+        elif use_wheel and not use_git:
             # Wheel ebuilds always need PYTHON_DEPS in RDEPEND
             ebuild_lines.append(f"")
             ebuild_lines.append(f"RDEPEND=\"${{PYTHON_DEPS}}\"")
@@ -2728,17 +2789,10 @@ cache-formats = md5-dict
             ebuild_lines.append(f"\"")
 
         # Add wheel-specific functions
-        if use_wheel:
-            wheel_filename = data.get('wheel_filename', '')
-            # Extract the package directory name from the wheel (e.g., "mypackage" or "mypackage-1.0.dist-info")
+        if use_wheel and not use_git:
+            # src_unpack handled by default (pypi_wheel_url --unpack adds .zip suffix)
+            # src_configure and src_compile not needed for pre-built wheels
             ebuild_lines.extend([
-                f"",
-                f"src_unpack() {{",
-                f"\tdefault",
-                f"\t# Wheel files are zip archives",
-                f"\tcd \"${{WORKDIR}}\" || die",
-                f"\tunzip -q \"${{DISTDIR}}/{wheel_filename}\" || die",
-                f"}}",
                 f"",
                 f"src_configure() {{ :; }}",
                 f"src_compile() {{ :; }}",
@@ -3643,7 +3697,8 @@ cache-formats = md5-dict
 def mount_filesystem(mountpoint: str, foreground: bool = False, debug: bool = False,
                     cache_ttl: int = 3600, cache_dir: Optional[str] = None,
                     filter_config: Optional[Dict] = None,
-                    patch_file: Optional[str] = None, no_patches: bool = False):
+                    patch_file: Optional[str] = None, no_patches: bool = False,
+                    enable_git_source: bool = True, git_tag_pattern: str = 'v${PV}'):
     """
     Mount the portage-pip FUSE filesystem.
 
@@ -3656,6 +3711,8 @@ def mount_filesystem(mountpoint: str, foreground: bool = False, debug: bool = Fa
         filter_config: Package filter configuration dictionary
         patch_file: Path to dependency patch file
         no_patches: If True, disable the dependency patching system
+        enable_git_source: If True, detect git repos for wheel-only packages
+        git_tag_pattern: Default git tag pattern for version mapping
     """
     # Only configure logging if it hasn't been configured yet (no handlers exist)
     if not logging.getLogger().handlers:
@@ -3671,7 +3728,9 @@ def mount_filesystem(mountpoint: str, foreground: bool = False, debug: bool = Fa
         filter_config=filter_config,
         patch_file=patch_file,
         no_patches=no_patches,
-        mount_point=mountpoint
+        mount_point=mountpoint,
+        enable_git_source=enable_git_source,
+        git_tag_pattern=git_tag_pattern
     )
     # Note: nothreads=False allows better signal handling for Ctrl+C
     FUSE(fs, mountpoint, nothreads=False, foreground=foreground, debug=debug, allow_other=True)
