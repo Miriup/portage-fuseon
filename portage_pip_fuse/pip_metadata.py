@@ -927,7 +927,19 @@ class PyPIMetadataExtractor:
             else:
                 # No usable distribution - package will not be visible
                 dist_info = None
-        
+
+        # Check for git repository URL when no sdist available
+        git_repo_url = None
+        if not sdist:
+            try:
+                from portage_pip_fuse.git_provider import extract_git_url
+                project_urls = metadata.get('project_urls', {})
+                git_repo_url = extract_git_url(project_urls)
+                if git_repo_url:
+                    logger.debug(f"Found git repository for {package_name}: {git_repo_url}")
+            except ImportError:
+                pass  # git_provider not available
+
         # Parse Python versions from classifiers first
         classifier_versions = self.extract_python_versions(metadata.get('classifiers', []))
 
@@ -936,30 +948,31 @@ class PyPIMetadataExtractor:
         requires_python = metadata.get('python_requires', '')
         specifier_versions = self.parse_requires_python(requires_python) if requires_python else []
 
-        # Combine requires_python with classifiers for best accuracy:
-        # - requires_python provides the minimum version
-        # - classifiers provide tested/supported versions (upper bound)
-        # When requires_python has no upper bound (e.g., >=3.7), use classifiers
-        # to cap the maximum supported version.
+        # Determine Python versions:
+        # - requires_python is authoritative when present (e.g., >=3.9 means 3.9+)
+        # - classifiers are often outdated and shouldn't cap requires_python
+        # - Only use classifiers to cap if requires_python has explicit upper bound
         specific_classifiers = [v for v in classifier_versions if v != '3']
 
-        if specifier_versions and specific_classifiers:
-            # If requires_python has no upper bound, use classifiers to cap it
-            # Check if requires_python is open-ended (only >= constraint)
+        if specifier_versions:
+            # Trust requires_python - it's the authoritative source
+            # Classifiers often lag behind (packages don't update for each Python release)
             has_upper_bound = '<' in requires_python if requires_python else False
-            if not has_upper_bound:
-                # Use intersection: versions from requires_python that are in classifiers
-                # But if classifier max < specifier max, cap at classifier max
+            if has_upper_bound and specific_classifiers:
+                # Only cap if requires_python explicitly has an upper bound
+                # AND classifiers provide a lower max (rare case)
                 max_classifier = max(specific_classifiers, key=lambda v: tuple(map(int, v.split('.'))))
-                python_versions = [v for v in specifier_versions
-                                   if tuple(map(int, v.split('.'))) <= tuple(map(int, max_classifier.split('.')))]
-                logger.debug(f"Capping requires_python '{requires_python}' at classifier max {max_classifier} -> {python_versions}")
+                max_specifier = max(specifier_versions, key=lambda v: tuple(map(int, v.split('.'))))
+                if tuple(map(int, max_classifier.split('.'))) < tuple(map(int, max_specifier.split('.'))):
+                    python_versions = [v for v in specifier_versions
+                                       if tuple(map(int, v.split('.'))) <= tuple(map(int, max_classifier.split('.')))]
+                    logger.debug(f"Capping requires_python '{requires_python}' at classifier max {max_classifier} -> {python_versions}")
+                else:
+                    python_versions = specifier_versions
+                    logger.debug(f"Using requires_python '{requires_python}' -> {python_versions}")
             else:
                 python_versions = specifier_versions
-                logger.debug(f"Using requires_python '{requires_python}' (has upper bound) -> {python_versions}")
-        elif specifier_versions:
-            python_versions = specifier_versions
-            logger.debug(f"Using requires_python '{requires_python}' -> {python_versions}")
+                logger.debug(f"Using requires_python '{requires_python}' -> {python_versions}")
         elif specific_classifiers:
             python_versions = specific_classifiers
             logger.debug(f"Using classifiers -> {python_versions}")
@@ -974,6 +987,7 @@ class PyPIMetadataExtractor:
             'source_distribution': sdist,
             'wheel_distribution': wheel_dist,
             'use_wheel': use_wheel,
+            'git_repo_url': git_repo_url,
             'python_versions': python_versions,
             'runtime_dependencies': runtime_deps,
             'optional_dependencies': optional_deps,
@@ -1600,8 +1614,9 @@ class EbuildDataExtractor:
         """
         Add ${PYTHON_USEDEP} to a Gentoo dependency string.
 
-        Handles both simple atoms and || ( ) groups by adding the USEDEP
-        to each individual atom.
+        Handles simple atoms, || ( ) groups, and space-separated compound
+        atoms (e.g., '>=pkg-1.0 <pkg-2.0') by adding the USEDEP to each
+        individual atom.
 
         Args:
             dep: Gentoo dependency string
@@ -1617,6 +1632,8 @@ class EbuildDataExtractor:
             '|| ( =dev-python/foo-1.0[${PYTHON_USEDEP}] =dev-python/foo-1.0.0[${PYTHON_USEDEP}] )'
             >>> extractor._add_python_usedep('dev-python/simple')
             'dev-python/simple[${PYTHON_USEDEP}]'
+            >>> extractor._add_python_usedep('>=dev-python/foo-1.0 <dev-python/foo-2.0')
+            '>=dev-python/foo-1.0[${PYTHON_USEDEP}] <dev-python/foo-2.0[${PYTHON_USEDEP}]'
         """
         usedep = '[${PYTHON_USEDEP}]'
 
@@ -1627,6 +1644,15 @@ class EbuildDataExtractor:
             atoms = inner.split()
             atoms_with_usedep = [f"{atom}{usedep}" for atom in atoms]
             return f"|| ( {' '.join(atoms_with_usedep)} )"
+
+        # Handle space-separated compound atoms (e.g., '>=pkg-1.0 <pkg-2.0')
+        # Check if this looks like multiple atoms (contains space and multiple category/package refs)
+        if ' ' in dep and not dep.startswith('|| '):
+            atoms = dep.split()
+            # Verify each part looks like an atom (contains /)
+            if all('/' in atom for atom in atoms):
+                atoms_with_usedep = [f"{atom}{usedep}" for atom in atoms]
+                return ' '.join(atoms_with_usedep)
 
         # Simple atom - just append USEDEP
         return f"{dep}{usedep}"
@@ -1996,14 +2022,33 @@ class EbuildDataExtractor:
         }
 
         # Set SRC_URI based on distribution type
-        if use_wheel:
+        # Priority: sdist > git > wheel
+        sdist = package_info.get('source_distribution')
+        git_repo_url = package_info.get('git_repo_url')
+
+        if sdist and sdist.get('url'):
+            # Prefer sdist
+            ebuild_data['SRC_URI'] = sdist.get('url', '')
+            ebuild_data['use_git'] = False
+        elif git_repo_url and not sdist:
+            # Use git source when no sdist available
+            try:
+                from portage_pip_fuse.git_provider import normalize_git_url
+                ebuild_data['use_git'] = True
+                ebuild_data['git_repo_uri'] = normalize_git_url(git_repo_url)
+                ebuild_data['git_commit'] = 'v${PV}'  # Most common tag pattern
+                ebuild_data['SRC_URI'] = ''  # No SRC_URI for git-based builds
+            except ImportError:
+                # Fallback to wheel if git_provider not available
+                if use_wheel:
+                    wheel_dist = package_info.get('wheel_distribution') or {}
+                    ebuild_data['SRC_URI'] = wheel_dist.get('url', '')
+                    ebuild_data['wheel_filename'] = wheel_dist.get('filename', '')
+        elif use_wheel:
             wheel_dist = package_info.get('wheel_distribution') or {}
             ebuild_data['SRC_URI'] = wheel_dist.get('url', '')
             ebuild_data['wheel_filename'] = wheel_dist.get('filename', '')
-        else:
-            sdist = package_info.get('source_distribution') or {}
-            ebuild_data['SRC_URI'] = sdist.get('url', '')
-        
+
         # Handle PyPI extras as USE flags
         optional_deps = package_info.get('optional_dependencies', [])
         if optional_deps:

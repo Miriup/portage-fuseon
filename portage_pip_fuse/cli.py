@@ -1582,6 +1582,20 @@ To unmount:
         help='Disable the dependency patching system (.sys/ filesystem)'
     )
 
+    mount_parser.add_argument(
+        '--no-git-source',
+        action='store_true',
+        help='Disable git repository detection for wheel-only packages'
+    )
+
+    mount_parser.add_argument(
+        '--git-tag-pattern',
+        type=str,
+        metavar='PATTERN',
+        default='v${PV}',
+        help='Default git tag pattern for version mapping (default: v${PV})'
+    )
+
     # Remove 'mount' from argv and parse remaining args
     mount_argv = [arg for arg in sys.argv[1:] if arg != 'mount']
     args = mount_parser.parse_args(mount_argv)
@@ -1773,7 +1787,9 @@ To unmount:
             cache_dir=str(cache_dir),
             filter_config=filter_config,
             patch_file=args.patch_file,
-            no_patches=args.no_patches
+            no_patches=args.no_patches,
+            enable_git_source=not args.no_git_source,
+            git_tag_pattern=args.git_tag_pattern
         )
     except KeyboardInterrupt:
         print("\nUnmounting...")

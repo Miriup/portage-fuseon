@@ -87,40 +87,76 @@ class VersionFilterBase(ABC):
 
 class VersionFilterSourceDist(VersionFilterBase):
     """
-    Filter to only show versions that have source distributions available.
-    
+    Filter to only show versions that have source distributions or git repos.
+
     This filter excludes wheel-only releases that don't have source code,
     which are not suitable for Gentoo's build-from-source philosophy.
+    When include_git is True (default), packages with git repository URLs
+    are also included, as they can be built using git-r3.eclass.
     """
-    
+
+    def __init__(self, include_git: bool = True):
+        """
+        Initialize the filter.
+
+        Args:
+            include_git: Whether to include packages with git repositories
+                        when no sdist is available (default: True)
+        """
+        self.include_git = include_git
+
     def filter_versions(self, pypi_name: str, versions_metadata: Dict[str, Dict]) -> Dict[str, Dict]:
-        """Filter to only versions with source distributions."""
+        """Filter to only versions with source distributions or git repos."""
         filtered = {}
         for version, metadata in versions_metadata.items():
             if self.should_include_version(pypi_name, version, metadata):
                 filtered[version] = metadata
         return filtered
-    
+
     def should_include_version(self, pypi_name: str, version: str, metadata: Dict) -> bool:
-        """Check if version has a source distribution."""
+        """Check if version has a source distribution or git repository."""
         # Check if this version has a source distribution
+        if self._has_sdist(metadata, version):
+            return True
+
+        # Check for git repository URL as fallback
+        if self.include_git and self._has_git_repo(metadata):
+            logger.debug(f"Version {version} of {pypi_name} has git repository")
+            return True
+
+        logger.debug(f"Version {version} of {pypi_name} has no source distribution or git repo")
+        return False
+
+    def _has_sdist(self, metadata: Dict, version: str) -> bool:
+        """Check if metadata indicates an sdist is available."""
         urls = metadata.get('urls', [])
         if not urls:
             # Try releases format (from package JSON)
             releases = metadata.get('releases', {})
             if version in releases:
                 urls = releases[version]
-        
+
         for url_info in urls:
             packagetype = url_info.get('packagetype', '')
             if packagetype == 'sdist':
                 return True
-        
-        logger.debug(f"Version {version} of {pypi_name} has no source distribution")
         return False
-    
+
+    def _has_git_repo(self, metadata: Dict) -> bool:
+        """Check if metadata contains a git repository URL."""
+        try:
+            from portage_pip_fuse.git_provider import extract_git_url
+            # Get project_urls from metadata (may be nested in 'info')
+            info = metadata.get('info', metadata)
+            project_urls = info.get('project_urls', {})
+            return extract_git_url(project_urls) is not None
+        except ImportError:
+            return False
+
     def get_description(self) -> str:
         """Get description of this filter."""
+        if self.include_git:
+            return "Only versions with source distributions or git repositories"
         return "Only versions with source distributions"
 
 
