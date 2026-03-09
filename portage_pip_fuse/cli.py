@@ -1880,5 +1880,429 @@ For subcommand help:
         return 1
 
 
+def main_pypi():
+    """
+    Entry point for portage-pypi-fuse CLI.
+
+    This is an alias for the main() function with PyPI-specific branding.
+    """
+    return main()
+
+
+def main_rubygems():
+    """
+    Entry point for portage-gem-fuse CLI.
+
+    This provides RubyGems-specific commands: mount, unmount, gem, bundle
+    """
+    from portage_pip_fuse.ecosystems.rubygems.cli import gem_command, bundle_command
+
+    parser = argparse.ArgumentParser(
+        prog='portage-gem-fuse',
+        description='FUSE filesystem that bridges RubyGems packages to Gentoo portage',
+        epilog='''
+Subcommands:
+  mount     Mount the RubyGems FUSE filesystem
+  unmount   Unmount the filesystem
+  install   Create /etc/portage/repos.conf entry for the overlay
+  gem       Translate gem install commands to emerge
+  bundle    Install from Gemfile.lock via emerge
+
+Examples:
+  %(prog)s mount                               # Mount at /var/db/repos/rubygems
+  %(prog)s mount /mnt/rubygems                 # Mount at custom location
+  %(prog)s unmount                             # Unmount
+  %(prog)s gem install rails                   # emerge dev-ruby/rails
+  %(prog)s bundle install                      # Install from Gemfile.lock
+
+For subcommand help:
+  %(prog)s <subcommand> --help
+        ''',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    parser.add_argument(
+        'subcommand',
+        nargs='?',
+        choices=['mount', 'unmount', 'install', 'gem', 'bundle'],
+        help='Subcommand to run'
+    )
+
+    parser.add_argument(
+        '--version',
+        action='version',
+        version='%(prog)s 0.1.0'
+    )
+
+    if len(sys.argv) < 2 or sys.argv[1] in ['-h', '--help']:
+        parser.print_help()
+        return 0
+
+    if sys.argv[1] == '--version':
+        print('portage-gem-fuse 0.1.0')
+        return 0
+
+    subcommand = sys.argv[1]
+
+    if subcommand == 'mount':
+        return rubygems_mount_command()
+    elif subcommand == 'unmount':
+        return rubygems_unmount_command()
+    elif subcommand == 'install':
+        return rubygems_install_command()
+    elif subcommand == 'gem':
+        return gem_command()
+    elif subcommand == 'bundle':
+        return bundle_command()
+    else:
+        print(f"Unknown subcommand: {subcommand}")
+        parser.print_help()
+        return 1
+
+
+def rubygems_mount_command():
+    """Handle mount subcommand for RubyGems."""
+    from portage_pip_fuse.plugin import PluginRegistry, ensure_plugins_discovered
+
+    ensure_plugins_discovered()
+    plugin = PluginRegistry.get('rubygems')
+
+    if plugin is None:
+        print("Error: RubyGems plugin not found")
+        return 1
+
+    mount_parser = argparse.ArgumentParser(
+        prog='portage-gem-fuse mount',
+        description='Mount the RubyGems FUSE filesystem',
+        epilog=f'''
+Examples:
+  %(prog)s                                     # Mount at default location ({plugin.default_repo_location})
+  %(prog)s /mnt/rubygems                       # Mount at custom location
+  %(prog)s -f                                  # Mount in foreground
+  %(prog)s -f -d                               # Mount with debug output
+
+After mounting, you can:
+  ls {plugin.default_repo_location}/dev-ruby/rails
+  cat {plugin.default_repo_location}/dev-ruby/rails/rails-7.0.0.ebuild
+
+To unmount:
+  fusermount -u {plugin.default_repo_location}
+        ''',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    mount_parser.add_argument(
+        'mountpoint',
+        nargs='?',
+        default=plugin.default_repo_location,
+        help=f'Directory where the filesystem will be mounted (default: {plugin.default_repo_location})'
+    )
+
+    mount_parser.add_argument(
+        '-f', '--foreground',
+        action='store_true',
+        help='Run in foreground instead of daemonizing'
+    )
+
+    mount_parser.add_argument(
+        '-d', '--debug',
+        action='store_true',
+        help='Enable debug output'
+    )
+
+    mount_parser.add_argument(
+        '--cache-ttl',
+        type=int,
+        default=3600,
+        help='Cache time-to-live in seconds (default: 3600)'
+    )
+
+    mount_parser.add_argument(
+        '--cache-dir',
+        type=str,
+        help='Cache directory for metadata'
+    )
+
+    mount_parser.add_argument(
+        '--pid-file',
+        type=str,
+        help='Write process ID to this file'
+    )
+
+    mount_parser.add_argument(
+        '--no-git-source',
+        action='store_true',
+        help='Disable git repository detection'
+    )
+
+    mount_parser.add_argument(
+        '--use-ruby',
+        type=str,
+        default='ruby32 ruby33',
+        help='Space-separated list of USE_RUBY targets (default: ruby32 ruby33)'
+    )
+
+    mount_parser.add_argument(
+        '--logfile',
+        type=str,
+        help='Log file path for debug output (default: stderr)'
+    )
+
+    mount_parser.add_argument(
+        '--max-versions',
+        type=int,
+        default=10,
+        metavar='N',
+        help='Limit versions shown per package (0=unlimited, default: 10)'
+    )
+
+    mount_parser.add_argument(
+        '--include-pre',
+        action='store_true',
+        help='Include pre-release versions (alpha, beta, rc)'
+    )
+
+    # Remove 'mount' from argv
+    mount_argv = [arg for arg in sys.argv[1:] if arg != 'mount']
+    args = mount_parser.parse_args(mount_argv)
+
+    # Parse USE_RUBY
+    use_ruby = args.use_ruby.split()
+
+    # Resolve cache directory
+    base_cache_dir = find_cache_dir(args.cache_dir)
+    cache_dir = base_cache_dir / 'rubygems'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set up logging
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+    if args.logfile:
+        logfile_path = Path(args.logfile).resolve()
+        try:
+            logfile_path.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            print(f"Error: Cannot create log directory {logfile_path.parent}")
+            return 1
+
+        logging.basicConfig(
+            level=log_level,
+            format=log_format,
+            filename=str(logfile_path),
+            filemode='a'
+        )
+        print(f"Logging to file: {logfile_path}")
+    else:
+        logging.basicConfig(level=log_level, format=log_format)
+
+    logger = logging.getLogger(__name__)
+
+    # Build filter configuration
+    filter_config = {
+        'disabled_filters': [],
+        'include_pre': args.include_pre,
+        'include_git': not args.no_git_source,
+        'max_versions': args.max_versions,
+    }
+
+    # Validate mountpoint
+    check_fuse_availability()
+    mountpoint = validate_mountpoint(args.mountpoint)
+
+    # Set up signal handlers
+    pid_file_path = Path(args.pid_file) if args.pid_file else None
+
+    def cleanup_pid_file():
+        if pid_file_path and pid_file_path.exists():
+            try:
+                pid_file_path.unlink()
+            except Exception:
+                pass
+
+    def signal_handler_with_cleanup(signum, frame):
+        cleanup_pid_file()
+        signal_handler(signum, frame)
+
+    signal.signal(signal.SIGINT, signal_handler_with_cleanup)
+    signal.signal(signal.SIGTERM, signal_handler_with_cleanup)
+
+    # Write PID file if requested
+    if pid_file_path:
+        try:
+            pid_file_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_file_path.write_text(str(os.getpid()))
+        except Exception as e:
+            print(f"Error: Failed to write PID file: {e}")
+            return 1
+
+    print(f"Mounting RubyGems FUSE filesystem at {mountpoint}")
+    print(f"Cache directory: {cache_dir}")
+    print(f"Cache TTL: {args.cache_ttl} seconds")
+    print(f"USE_RUBY: {', '.join(use_ruby)}")
+    print(f"Max versions per package: {args.max_versions if args.max_versions > 0 else 'unlimited'}")
+
+    if args.include_pre:
+        print("Including pre-release versions")
+
+    if pid_file_path:
+        print(f"PID file: {pid_file_path}")
+
+    if args.foreground:
+        print("Running in foreground (Ctrl+C to unmount)")
+    else:
+        print("Running in background")
+        if pid_file_path:
+            print(f"To unmount: portage-gem-fuse unmount --pid-file {pid_file_path}")
+        else:
+            print(f"To unmount: fusermount -u {mountpoint}")
+
+    try:
+        from portage_pip_fuse.ecosystems.rubygems.filesystem import mount_rubygems_filesystem
+
+        mount_rubygems_filesystem(
+            str(mountpoint),
+            foreground=args.foreground,
+            debug=args.debug,
+            cache_ttl=args.cache_ttl,
+            cache_dir=str(cache_dir),
+            filter_config=filter_config,
+            use_ruby=use_ruby
+        )
+    except KeyboardInterrupt:
+        print("\nUnmounting...")
+    except PermissionError:
+        print("Error: Permission denied")
+        print("Try running with sudo or check FUSE permissions")
+        cleanup_pid_file()
+        return 1
+    except Exception as e:
+        logger.error(f"Mount failed: {e}")
+        import traceback
+        traceback.print_exc()
+        cleanup_pid_file()
+        return 1
+
+    cleanup_pid_file()
+    return 0
+
+
+def rubygems_unmount_command():
+    """Handle unmount subcommand for RubyGems."""
+    from portage_pip_fuse.plugin import PluginRegistry, ensure_plugins_discovered
+
+    ensure_plugins_discovered()
+    plugin = PluginRegistry.get('rubygems')
+
+    if plugin is None:
+        print("Error: RubyGems plugin not found")
+        return 1
+
+    unmount_parser = argparse.ArgumentParser(
+        prog='portage-gem-fuse unmount',
+        description='Unmount the RubyGems FUSE filesystem'
+    )
+
+    unmount_parser.add_argument(
+        'mountpoint',
+        nargs='?',
+        default=plugin.default_repo_location,
+        help=f'Directory where the filesystem is mounted (default: {plugin.default_repo_location})'
+    )
+
+    mount_argv = [arg for arg in sys.argv[1:] if arg != 'unmount']
+    args = unmount_parser.parse_args(mount_argv)
+
+    mountpoint = Path(args.mountpoint).resolve()
+
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['fusermount', '-u', str(mountpoint)],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print(f"✓ Unmounted {mountpoint}")
+            return 0
+        else:
+            if 'not mounted' in result.stderr or 'not found' in result.stderr:
+                print(f"Error: {mountpoint} is not mounted")
+            else:
+                print(f"Error: {result.stderr.strip()}")
+            return 1
+    except FileNotFoundError:
+        print("Error: fusermount not found. Install fuse-utils.")
+        return 1
+
+
+def rubygems_install_command():
+    """Handle install subcommand for RubyGems - creates repos.conf file."""
+    from portage_pip_fuse.plugin import PluginRegistry, ensure_plugins_discovered
+
+    ensure_plugins_discovered()
+    plugin = PluginRegistry.get('rubygems')
+
+    if plugin is None:
+        print("Error: RubyGems plugin not found")
+        return 1
+
+    install_parser = argparse.ArgumentParser(
+        prog='portage-gem-fuse install',
+        description='Create portage repos.conf file for the RubyGems FUSE overlay'
+    )
+
+    install_parser.add_argument(
+        'mountpoint',
+        nargs='?',
+        default=plugin.default_repo_location,
+        help=f'Directory where the filesystem will be mounted (default: {plugin.default_repo_location})'
+    )
+
+    install_parser.add_argument(
+        '--priority',
+        type=int,
+        default=-50,
+        help='Repository priority (default: -50)'
+    )
+
+    mount_argv = [arg for arg in sys.argv[1:] if arg != 'install']
+    args = install_parser.parse_args(mount_argv)
+
+    mountpoint = Path(args.mountpoint).resolve()
+    repos_conf_dir = Path('/etc/portage/repos.conf')
+    conf_file = repos_conf_dir / f'{plugin.repo_name}.conf'
+
+    conf_content = f"""[{plugin.repo_name}]
+location = {mountpoint}
+sync-type =
+auto-sync = no
+priority = {args.priority}
+"""
+
+    if not repos_conf_dir.exists():
+        print(f"Error: {repos_conf_dir} does not exist")
+        return 1
+
+    if conf_file.exists():
+        print(f"Warning: {conf_file} already exists")
+        response = input("Overwrite? [y/N]: ")
+        if response.lower() not in ['y', 'yes']:
+            print("Aborted")
+            return 0
+
+    try:
+        conf_file.write_text(conf_content)
+        print(f"Created {conf_file}")
+        print(f"\nTo use the overlay:")
+        print(f"  1. Mount the filesystem: portage-gem-fuse mount {mountpoint}")
+        print(f"  2. Emerge packages: emerge -av dev-ruby/rails")
+        return 0
+    except PermissionError:
+        print(f"Error: Permission denied writing to {conf_file}")
+        print("Try running with sudo")
+        return 1
+
+
 if __name__ == "__main__":
     sys.exit(main())

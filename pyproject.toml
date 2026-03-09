@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "portage-pip-fuse"
+name = "portage-fuse"
 version = "0.1.0"
-description = "A FUSE-based filesystem adapter that bridges pip and portage package managers"
+description = "A FUSE-based filesystem adapter that bridges package managers (PyPI, RubyGems) with Gentoo portage"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "GPL-2.0"}
@@ -31,7 +31,7 @@ classifiers = [
     "Topic :: System :: Software Distribution",
     "Topic :: System :: Systems Administration :: Package Management",
 ]
-keywords = ["portage", "pip", "fuse", "filesystem", "package-management", "gentoo"]
+keywords = ["portage", "pip", "gem", "ruby", "fuse", "filesystem", "package-management", "gentoo"]
 dependencies = [
     "fusepy>=3.0.1",
 ]
@@ -53,7 +53,11 @@ Issues = "https://github.com/Miriup/portage-pip-fuse/issues"
 Documentation = "https://github.com/Miriup/portage-pip-fuse/docs"
 
 [project.scripts]
+# Legacy name (for backwards compatibility)
 portage-pip-fuse = "portage_pip_fuse.cli:main"
+# New ecosystem-specific entry points
+portage-pypi-fuse = "portage_pip_fuse.cli:main_pypi"
+portage-gem-fuse = "portage_pip_fuse.cli:main_rubygems"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -1,14 +1,25 @@
-# Coding Style Guide for portage-pip-fuse
+# Coding Style Guide for portage-fuse
 
-This document outlines the coding style and development practices for the portage-pip-fuse project.
+This document outlines the coding style and development practices for the portage-fuse project (formerly portage-pip-fuse).
+
+## Multi-Ecosystem Architecture
+
+This project supports multiple package ecosystems through a plugin architecture:
+
+| Ecosystem | CLI Command | Default Category | Overlay Path |
+|-----------|-------------|------------------|--------------|
+| PyPI | `portage-pypi-fuse` | `dev-python` | `/var/db/repos/pypi` |
+| RubyGems | `portage-gem-fuse` | `dev-ruby` | `/var/db/repos/rubygems` |
+
+The legacy `portage-pip-fuse` command remains available for backwards compatibility.
 
 ## Project Goals and Non-Goals
 
 ### Primary Goals
-- Provide FUSE filesystem interface for PyPI packages to Gentoo portage
-- **pip command translation**: Translate `pip install` commands to `emerge` commands
-- Filter packages by Python compatibility with the system (PYTHON_TARGETS)
-- Filter packages to only those with source distributions available
+- Provide FUSE filesystem interface for package ecosystems (PyPI, RubyGems) to Gentoo portage
+- **Command translation**: Translate `pip install` / `gem install` / `bundle install` to `emerge` commands
+- Filter packages by interpreter compatibility (PYTHON_TARGETS / USE_RUBY)
+- Filter packages to those with source distributions available
 - Support dependency resolution for specific packages with USE flags
 - Maintain high performance with comprehensive caching
 
@@ -267,9 +278,10 @@ Licensed under GPL-2.0
 ```
 portage_pip_fuse/
 ├── __init__.py          # Package initialization, version info
+├── plugin.py            # Plugin infrastructure (EcosystemPlugin, PluginRegistry)
 ├── name_translator.py   # Name translation logic
 ├── filesystem.py        # FUSE filesystem implementation
-├── cli.py              # Command-line interface (mount, pip, sync, etc.)
+├── cli.py              # Command-line interface (mount, pip, gem, bundle, sync, etc.)
 ├── pip_metadata.py      # PyPI metadata extraction and ebuild data
 ├── sqlite_metadata.py   # SQLite backend for PyPI database
 ├── hybrid_metadata.py   # SQLite + JSON API fallback
@@ -279,21 +291,47 @@ portage_pip_fuse/
 ├── prefetcher.py        # Repository scanning utilities
 ├── source_provider.py   # Source provider abstraction (sdist, git, wheel)
 ├── git_provider.py      # Git URL detection and normalization
-└── git_source_patch.py  # Git source configuration patches
+├── git_source_patch.py  # Git source configuration patches
+└── ecosystems/          # Ecosystem-specific implementations
+    ├── __init__.py
+    ├── pypi/            # PyPI ecosystem plugin
+    │   ├── __init__.py
+    │   └── plugin.py    # PyPIPlugin, PyPIMetadataProvider, PyPIEbuildGenerator
+    └── rubygems/        # RubyGems ecosystem plugin
+        ├── __init__.py
+        ├── plugin.py         # RubyGemsPlugin, metadata provider, ebuild generator
+        ├── name_translator.py # Gem to Gentoo name translation
+        ├── source_provider.py # GemSourceProvider, RubyGitProvider
+        ├── filters.py        # RubyCompatFilter, PlatformFilter, PreReleaseFilter
+        ├── cli.py            # gem_command(), bundle_command()
+        └── gemfile_parser.py # Gemfile.lock parsing
 ```
 
 ## CLI Architecture
 
-The CLI (`cli.py`) uses argparse with subcommand dispatch:
+The CLI (`cli.py`) uses argparse with subcommand dispatch. Three entry points are available:
 
-```python
+### PyPI CLI (portage-pypi-fuse / portage-pip-fuse)
+
+```bash
 # Main subcommands
-portage-pip-fuse mount      # Mount FUSE filesystem
-portage-pip-fuse unmount    # Unmount filesystem
-portage-pip-fuse install    # Create repos.conf
-portage-pip-fuse sync       # Sync SQLite database
-portage-pip-fuse unsync     # Delete database
-portage-pip-fuse pip        # pip install translation
+portage-pypi-fuse mount      # Mount FUSE filesystem for PyPI
+portage-pypi-fuse unmount    # Unmount filesystem
+portage-pypi-fuse install    # Create repos.conf
+portage-pypi-fuse sync       # Sync SQLite database
+portage-pypi-fuse unsync     # Delete database
+portage-pypi-fuse pip        # pip install translation
+```
+
+### RubyGems CLI (portage-gem-fuse)
+
+```bash
+# Main subcommands
+portage-gem-fuse mount       # Mount FUSE filesystem for RubyGems
+portage-gem-fuse unmount     # Unmount filesystem
+portage-gem-fuse install     # Create repos.conf
+portage-gem-fuse gem         # gem install translation
+portage-gem-fuse bundle      # bundle install translation (from Gemfile.lock)
 ```
 
 ### pip Subcommand Implementation
@@ -409,6 +447,244 @@ filter = VersionFilterSourceDist(include_git=True)
 
 # Only include packages with sdist
 filter = VersionFilterSourceDist(include_git=False)
+```
+
+## Plugin System
+
+The plugin architecture enables support for multiple package ecosystems while sharing ~70% of the codebase (FUSE mechanics, caching, CLI infrastructure).
+
+### Core Abstractions
+
+```python
+from abc import ABC, abstractmethod
+
+class EcosystemPlugin(ABC):
+    """Base class for ecosystem plugins."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Ecosystem name (e.g., 'pypi', 'rubygems')."""
+        pass
+
+    @property
+    @abstractmethod
+    def default_category(self) -> str:
+        """Default Gentoo category (e.g., 'dev-python', 'dev-ruby')."""
+        pass
+
+    @abstractmethod
+    def get_metadata_provider(self, cache_dir, cache_ttl) -> MetadataProviderBase:
+        """Get the metadata provider for this ecosystem."""
+        pass
+
+    @abstractmethod
+    def get_ebuild_generator(self, **kwargs) -> EbuildGeneratorBase:
+        """Get the ebuild generator for this ecosystem."""
+        pass
+```
+
+### Plugin Discovery
+
+Plugins are automatically discovered from the `ecosystems/` package:
+
+```python
+from portage_pip_fuse.plugin import PluginRegistry
+
+# Get all registered plugins
+plugins = PluginRegistry.get_all_plugins()  # {'pypi': PyPIPlugin, 'rubygems': RubyGemsPlugin}
+
+# Get a specific plugin
+pypi = PluginRegistry.get_plugin('pypi')
+rubygems = PluginRegistry.get_plugin('rubygems')
+```
+
+### Creating a New Ecosystem Plugin
+
+1. Create a new directory under `ecosystems/`:
+   ```
+   ecosystems/neweco/
+   ├── __init__.py
+   └── plugin.py
+   ```
+
+2. Implement the plugin class:
+   ```python
+   from portage_pip_fuse.plugin import EcosystemPlugin
+
+   class NewEcoPlugin(EcosystemPlugin):
+       @property
+       def name(self) -> str:
+           return "neweco"
+       # ... implement other abstract methods
+   ```
+
+3. Register the plugin in `__init__.py`:
+   ```python
+   from .plugin import NewEcoPlugin
+   ```
+
+## RubyGems Ecosystem Support
+
+The RubyGems ecosystem provides FUSE overlay support for Ruby packages from RubyGems.org.
+
+### Key Differences from PyPI
+
+| Aspect | RubyGems | PyPI |
+|--------|----------|------|
+| Compatibility variable | `USE_RUBY="ruby32 ruby33"` | `PYTHON_COMPAT=(python3_{11,12})` |
+| Primary eclass | `ruby-fakegem` | `distutils-r1` |
+| Dependency helpers | `ruby_add_rdepend "dep"` | `RDEPEND="dep[${PYTHON_USEDEP}]"` |
+| Source format | `.gem` archive | sdist / wheel |
+| Version constraint | `~> 2.1` (pessimistic) | `~= 2.1` (compatible) |
+
+### RubyGems Ebuild Template
+
+```bash
+EAPI=8
+
+USE_RUBY="ruby32 ruby33"
+RUBY_FAKEGEM_RECIPE_TEST="none"
+RUBY_FAKEGEM_RECIPE_DOC="none"
+
+inherit ruby-fakegem
+
+DESCRIPTION="Package description"
+HOMEPAGE="https://rubygems.org/gems/example"
+SRC_URI="https://rubygems.org/gems/${PN}-${PV}.gem"
+
+LICENSE="MIT"
+SLOT="0"
+KEYWORDS="~amd64 ~arm64"
+
+ruby_add_rdepend ">=dev-ruby/rails-7.0 <dev-ruby/rails-8"
+```
+
+### Version Constraint Translation
+
+Ruby's pessimistic constraint operator (`~>`) is translated to Gentoo atoms:
+
+| Ruby Constraint | Gentoo Atoms |
+|-----------------|--------------|
+| `~> 2.1.3` | `>=dev-ruby/pkg-2.1.3 <dev-ruby/pkg-2.2` |
+| `~> 2.1` | `>=dev-ruby/pkg-2.1 <dev-ruby/pkg-3` |
+| `>= 1.0, < 2.0` | `>=dev-ruby/pkg-1.0 <dev-ruby/pkg-2.0` |
+| `= 1.0.0` | `=dev-ruby/pkg-1.0.0` |
+| `!= 1.5.0` | `!=dev-ruby/pkg-1.5.0` |
+
+### gem Command
+
+Translates `gem install` to `emerge`:
+
+```bash
+# Basic install
+portage-gem-fuse gem install rails
+# Translates to: emerge dev-ruby/rails
+
+# With version
+portage-gem-fuse gem install rails -v 7.0.0
+# Translates to: emerge =dev-ruby/rails-7.0.0
+
+# Dry run
+portage-gem-fuse gem install --dry-run rails nokogiri
+# Shows: Would run: emerge --ask dev-ruby/rails dev-ruby/nokogiri
+```
+
+### bundle Command
+
+Parses Gemfile.lock and installs all dependencies:
+
+```bash
+# From project directory with Gemfile.lock
+cd ~/src/myproject
+portage-gem-fuse bundle install
+
+# Creates: /etc/portage/sets/myproject-gems
+# Runs: emerge @myproject-gems
+
+# Generate virtual ebuild instead
+portage-gem-fuse bundle install --deps-overlay /var/db/repos/rubygems
+# Creates: /var/db/repos/rubygems/virtual/myproject/myproject-0.ebuild
+```
+
+### Gemfile.lock Parser
+
+The parser handles all standard Gemfile.lock sections:
+
+```python
+from portage_pip_fuse.ecosystems.rubygems.gemfile_parser import (
+    parse_gemfile_lock,
+    parse_gemfile_lock_full,
+    GemDependency,
+    GemfileLockData,
+)
+
+# Simple interface - list of gems
+gems = parse_gemfile_lock('/path/to/Gemfile.lock')
+for gem in gems:
+    print(f"{gem.name} {gem.version} ({gem.source_type})")
+
+# Full data including platforms, direct dependencies, etc.
+data = parse_gemfile_lock_full('/path/to/Gemfile.lock')
+print(f"Direct dependencies: {data.direct_dependencies}")
+print(f"Platforms: {data.platforms}")
+print(f"Bundler version: {data.bundled_with}")
+```
+
+Supported sections:
+- **GEM**: Gems from RubyGems.org
+- **GIT**: Gems from git repositories
+- **PATH**: Local gems
+- **PLATFORMS**: Target platforms
+- **DEPENDENCIES**: Direct dependencies
+- **RUBY VERSION**: Ruby version constraint
+- **BUNDLED WITH**: Bundler version
+
+### RubyGems Name Translation
+
+Gem names are translated to Gentoo package names:
+
+```python
+from portage_pip_fuse.ecosystems.rubygems.name_translator import (
+    create_rubygems_translator
+)
+
+translator = create_rubygems_translator()
+translator.rubygems_to_gentoo('activerecord')  # 'activerecord'
+translator.rubygems_to_gentoo('aws-sdk-s3')    # 'aws-sdk-s3'
+translator.gentoo_to_rubygems('rails')         # 'rails'
+```
+
+Known mappings for common gems are built-in, and the translator can preload existing `dev-ruby/*` packages from Gentoo repositories.
+
+### RubyGems Filters
+
+Available filters for gem version selection:
+
+| Filter | Description |
+|--------|-------------|
+| `ruby-compat` | Filters by `required_ruby_version` against system USE_RUBY |
+| `gem-source` | Filters to gems with `.gem` files or git repositories |
+| `platform` | Excludes platform-specific gems (java, mswin, darwin) |
+| `pre-release` | Excludes alpha/beta/rc versions |
+
+```python
+from portage_pip_fuse.ecosystems.rubygems.filters import (
+    RubyCompatFilter,
+    PlatformFilter,
+    PreReleaseFilter,
+    VersionFilterChain,
+)
+
+# Create filter chain
+filters = VersionFilterChain([
+    RubyCompatFilter(use_ruby=['ruby32', 'ruby33']),
+    PlatformFilter(),
+    PreReleaseFilter(include_pre=False),
+])
+
+# Filter versions
+filtered = filters.filter_versions('rails', versions_metadata)
 ```
 
 ## Performance Considerations
