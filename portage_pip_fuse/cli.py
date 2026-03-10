@@ -2056,9 +2056,9 @@ To unmount:
     mount_parser.add_argument(
         '--max-versions',
         type=int,
-        default=10,
+        default=0,
         metavar='N',
-        help='Limit versions shown per package (0=unlimited, default: 10)'
+        help='Limit versions shown per package (default: 0=unlimited)'
     )
 
     mount_parser.add_argument(
