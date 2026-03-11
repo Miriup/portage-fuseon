@@ -1,4 +1,4 @@
-# portage-pip-fuse
+# portage-fuseon
 
 A FUSE-based filesystem that presents PyPI packages as a Gentoo portage overlay, enabling direct installation of Python packages via `emerge`.
 
@@ -371,6 +371,11 @@ portage-pip-fuse mount --test
 black portage_pip_fuse
 isort portage_pip_fuse
 ```
+
+## Official transliteration into other alphabeths
+
+* Cyrillic: Портидж Фюжн — because unlike a certain German techno festival at a former Soviet airfield, we transliterate what we actually say, not what we spell.
+* Arabic: بورتيدج فيوجن
 
 ## License
 
