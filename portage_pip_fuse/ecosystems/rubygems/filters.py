@@ -518,6 +518,9 @@ class GentooVersionFilter:
     # Standard Gentoo pre-release suffix names
     STANDARD_SUFFIXES = {'alpha', 'beta', 'pre', 'rc', 'p'}
 
+    # Ruby shorthand -> Gentoo suffix (e.g., 5.a -> 5_alpha)
+    SHORTHAND_MAP = {'a': 'alpha', 'b': 'beta'}
+
     @classmethod
     def get_filter_name(cls) -> str:
         """Get the filter name for registry."""
@@ -589,6 +592,12 @@ class GentooVersionFilter:
             True
             >>> f._can_translate_version('5.0.0.beta1.1')
             True
+            >>> f._can_translate_version('5.a')
+            True
+            >>> f._can_translate_version('5.b')
+            True
+            >>> f._can_translate_version('5.a1')
+            True
             >>> f._can_translate_version('5.0.0.racecar1')
             False
             >>> f._can_translate_version('1.0.0.RELEASE')
@@ -615,7 +624,10 @@ class GentooVersionFilter:
         while i < len(components):
             comp = components[i].lower()
 
-            if comp in self.STANDARD_SUFFIXES:
+            # Check for Ruby shorthand (a, b)
+            if comp in self.SHORTHAND_MAP:
+                i += 1
+            elif comp in self.STANDARD_SUFFIXES:
                 # Standard suffix - check if next component is a number
                 if i + 1 < len(components) and components[i + 1].isdigit():
                     i += 2
@@ -623,6 +635,9 @@ class GentooVersionFilter:
                     i += 1
             elif comp.isdigit():
                 # Standalone number - valid as patchlevel
+                i += 1
+            elif re.match(r'^([ab])(\d+)$', comp):
+                # Shorthand with number (a1 -> alpha1, b2 -> beta2)
                 i += 1
             elif re.match(r'^([a-z]+)(\d+)$', comp):
                 # Combined suffix like 'alpha1', 'beta2'

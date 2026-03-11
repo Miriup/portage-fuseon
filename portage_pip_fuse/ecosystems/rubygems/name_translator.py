@@ -4,10 +4,16 @@ Name translation between RubyGems and Gentoo package names.
 This module provides bidirectional translation between RubyGems gem names
 and Gentoo dev-ruby package names.
 
-Naming conventions:
-- Gems typically use underscores (active_support)
-- Gentoo uses hyphens (activerecord -> activerecord, not active-record)
-- Some gems have different names in Gentoo (e.g., 'rake' -> 'rake')
+Design principles:
+- Use exact gem names by default (no heuristic matching)
+- Only apply explicit mappings from KNOWN_MAPPINGS or Gentoo metadata.xml
+- Minimal transformations for PMS compatibility (trailing digits)
+- For mismatches, use the .sys patching mechanism to configure mappings
+
+Transformations applied:
+- Lowercase normalization
+- Trailing digit separator removal (iso-639 -> iso639) for PMS compatibility
+- Underscores preserved (valid per PMS 3.1.2)
 
 Copyright (C) 2026 Dirk Tilger <dirk@systemication.com>
 Licensed under GPL-2.0
@@ -34,7 +40,7 @@ class RubyGemsNameTranslator:
         >>> translator.rubygems_to_gentoo('active_support')
         'activesupport'
         >>> translator.gentoo_to_rubygems('activesupport')
-        'active_support'
+        'activesupport'
     """
 
     # Known mappings where gem name differs from Gentoo name
@@ -89,7 +95,19 @@ class RubyGemsNameTranslator:
     }
 
     # Reverse mappings (gentoo -> gem)
-    REVERSE_MAPPINGS = {v: k for k, v in KNOWN_MAPPINGS.items()}
+    # When multiple gems map to the same Gentoo name, prefer canonical names
+    # (where gem_name == gentoo_name) to avoid issues like:
+    # 'activemodel' -> 'active_model' when it should be 'activemodel' -> 'activemodel'
+    @classmethod
+    def _build_reverse_mappings(cls) -> Dict[str, str]:
+        result = {}
+        for gem, gentoo in cls.KNOWN_MAPPINGS.items():
+            # Prefer canonical mappings (gem == gentoo) over aliases
+            if gentoo not in result or gem == gentoo:
+                result[gentoo] = gem
+        return result
+
+    REVERSE_MAPPINGS: Dict[str, str] = {}  # Will be populated after class definition
 
     def __init__(self, preload_gentoo: bool = True):
         """
@@ -148,6 +166,10 @@ class RubyGemsNameTranslator:
         """
         Translate RubyGems package name to Gentoo package name.
 
+        Uses exact gem names by default. Explicit mappings from KNOWN_MAPPINGS
+        or extracted from Gentoo metadata.xml are used when available.
+        For mismatches, use the .sys patching mechanism to configure mappings.
+
         Args:
             gem_name: RubyGems gem name
 
@@ -161,30 +183,19 @@ class RubyGemsNameTranslator:
             >>> translator.rubygems_to_gentoo('rspec-core')
             'rspec-core'
             >>> translator.rubygems_to_gentoo('my_new_gem')
-            'my-new-gem'
+            'my_new_gem'
+            >>> translator.rubygems_to_gentoo('ruby-debug')
+            'ruby-debug'
         """
         # Normalize input
         gem_name = gem_name.strip().lower()
 
-        # Check known mappings first
+        # Check known mappings first (from KNOWN_MAPPINGS or Gentoo metadata.xml)
         if gem_name in self._gem_to_gentoo:
             return self._gem_to_gentoo[gem_name]
 
-        # Apply standard translation rules
+        # Apply minimal translation rules (lowercase, fix PMS-incompatible names)
         gentoo_name = self._apply_translation_rules(gem_name)
-
-        # Check if translated name exists in Gentoo
-        if gentoo_name in self._gentoo_packages:
-            return gentoo_name
-
-        # Check alternative translations
-        alternatives = self._generate_alternatives(gem_name)
-        for alt in alternatives:
-            if alt in self._gentoo_packages:
-                # Cache this mapping for future use
-                self._gem_to_gentoo[gem_name] = alt
-                self._gentoo_to_gem[alt] = gem_name
-                return alt
 
         return gentoo_name
 
@@ -202,7 +213,7 @@ class RubyGemsNameTranslator:
         Examples:
             >>> translator = RubyGemsNameTranslator(preload_gentoo=False)
             >>> translator.gentoo_to_rubygems('activesupport')
-            'active_support'
+            'activesupport'
             >>> translator.gentoo_to_rubygems('rspec-core')
             'rspec-core'
         """
@@ -253,28 +264,6 @@ class RubyGemsNameTranslator:
 
         return name
 
-    def _generate_alternatives(self, gem_name: str) -> list:
-        """Generate alternative Gentoo names to check."""
-        alternatives = []
-        name = gem_name.lower()
-
-        # Try without underscores (joined)
-        alternatives.append(name.replace('_', ''))
-
-        # Try with hyphens
-        alternatives.append(name.replace('_', '-'))
-
-        # Try with underscores (some Gentoo packages keep them)
-        alternatives.append(name)
-
-        # Try common transformations
-        if name.startswith('ruby-'):
-            alternatives.append(name[5:])
-        if not name.startswith('ruby-'):
-            alternatives.append(f"ruby-{name}")
-
-        return alternatives
-
     def is_valid_gem_name(self, name: str) -> bool:
         """
         Check if a string is a valid gem name.
@@ -300,6 +289,10 @@ class RubyGemsNameTranslator:
         if not name:
             return False
         return bool(re.match(r'^[a-z][a-z0-9+-]*$', name))
+
+
+# Populate REVERSE_MAPPINGS after class definition
+RubyGemsNameTranslator.REVERSE_MAPPINGS = RubyGemsNameTranslator._build_reverse_mappings()
 
 
 class CachedRubyGemsTranslator(RubyGemsNameTranslator):

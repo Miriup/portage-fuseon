@@ -631,6 +631,9 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
         # Standard Gentoo suffix names
         standard_suffixes = {'alpha', 'beta', 'pre', 'rc'}
 
+        # Ruby shorthand -> Gentoo suffix (e.g., 5.a -> 5_alpha)
+        shorthand_map = {'a': 'alpha', 'b': 'beta'}
+
         # Split into base version and suffix
         match = re.match(r'^(\d+(?:\.\d+)*)(.*)$', gem_version)
         if not match:
@@ -653,19 +656,27 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
         for comp in components:
             comp_lower = comp.lower()
 
-            if comp_lower in standard_suffixes:
+            # Check for Ruby shorthand (a, b, a1, b2)
+            if comp_lower in shorthand_map:
+                gentoo_suffix += f'_{shorthand_map[comp_lower]}'
+            elif comp_lower in standard_suffixes:
                 gentoo_suffix += f'_{comp_lower}'
             elif comp.isdigit():
                 # Standalone number - treat as patchlevel
                 gentoo_suffix += f'_p{comp}'
             else:
-                # Check for combined suffix like 'alpha1', 'beta2'
-                m = re.match(r'^([a-z]+)(\d+)$', comp_lower)
-                if m and m.group(1) in standard_suffixes:
-                    gentoo_suffix += f'_{m.group(1)}{m.group(2)}'
+                # Check for shorthand with number (a1 -> alpha1, b2 -> beta2)
+                m = re.match(r'^([ab])(\d+)$', comp_lower)
+                if m:
+                    gentoo_suffix += f'_{shorthand_map[m.group(1)]}{m.group(2)}'
                 else:
-                    # Non-standard suffix - keep as-is (may produce invalid version)
-                    gentoo_suffix += f'.{comp}'
+                    # Check for combined suffix like 'alpha1', 'beta2'
+                    m = re.match(r'^([a-z]+)(\d+)$', comp_lower)
+                    if m and m.group(1) in standard_suffixes:
+                        gentoo_suffix += f'_{m.group(1)}{m.group(2)}'
+                    else:
+                        # Non-standard suffix - keep as-is (may produce invalid version)
+                        gentoo_suffix += f'.{comp}'
 
         return base + gentoo_suffix
 

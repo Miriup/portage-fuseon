@@ -357,6 +357,9 @@ cache-formats = md5-dict
         # Standard Gentoo suffix names (excluding 'p' as it's only for patchlevel)
         standard_suffixes = {'alpha', 'beta', 'pre', 'rc'}
 
+        # Ruby shorthand -> Gentoo suffix (e.g., 5.a -> 5_alpha)
+        shorthand_map = {'a': 'alpha', 'b': 'beta'}
+
         # Split into base version (numbers.numbers...) and suffix
         match = re.match(r'^(\d+(?:\.\d+)*)(.*)$', gem_version)
         if not match:
@@ -380,12 +383,21 @@ cache-formats = md5-dict
         while i < len(components):
             comp = components[i].lower()
 
-            if comp in standard_suffixes:
+            # Check for Ruby shorthand (a, b)
+            if comp in shorthand_map:
+                gentoo_suffix += f'_{shorthand_map[comp]}'
+                i += 1
+            elif comp in standard_suffixes:
                 gentoo_suffix += f'_{comp}'
                 i += 1
             elif comp.isdigit():
                 # Standalone number - treat as patchlevel (_p)
                 gentoo_suffix += f'_p{comp}'
+                i += 1
+            elif re.match(r'^([ab])(\d+)$', comp):
+                # Shorthand with number (a1 -> alpha1, b2 -> beta2)
+                m = re.match(r'^([ab])(\d+)$', comp)
+                gentoo_suffix += f'_{shorthand_map[m.group(1)]}{m.group(2)}'
                 i += 1
             elif re.match(r'^([a-z]+)(\d+)$', comp):
                 # Combined suffix like 'alpha1', 'beta2', 'pre4'

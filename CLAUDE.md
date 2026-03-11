@@ -673,11 +673,16 @@ Supported sections:
 
 ### RubyGems Name Translation
 
-Gem names are translated to Gentoo package names. Underscores are **preserved** (they're valid per PMS 3.1.2) to distinguish gems like:
-- `devise-secure_password` (underscore) → `dev-ruby/devise-secure_password`
-- `devise-secure-password` (hyphen) → `dev-ruby/devise-secure-password`
+Gem names are used **exactly as specified** in RubyGems, with minimal transformations for PMS compatibility:
 
-These are different gems on RubyGems and remain distinguishable in Gentoo.
+1. **Underscores preserved**: Valid per PMS 3.1.2, distinguishes different gems:
+   - `devise-secure_password` → `dev-ruby/devise-secure_password`
+   - `devise-secure-password` → `dev-ruby/devise-secure-password`
+
+2. **Trailing digits fixed**: Names ending in `-NUMBER` conflict with version parsing:
+   - `iso-639` → `dev-ruby/iso639`
+
+3. **No heuristic matching**: Unlike previous versions, we do NOT try to match `ruby-foo` to `foo` or vice versa. Each gem gets its own package name.
 
 ```python
 from portage_pip_fuse.ecosystems.rubygems.name_translator import (
@@ -686,12 +691,14 @@ from portage_pip_fuse.ecosystems.rubygems.name_translator import (
 
 translator = create_rubygems_translator()
 translator.rubygems_to_gentoo('activerecord')          # 'activerecord'
-translator.rubygems_to_gentoo('devise-secure_password') # 'devise-secure_password'
-translator.rubygems_to_gentoo('iso-639')               # 'iso639' (trailing digits)
-translator.gentoo_to_rubygems('rails')                 # 'rails'
+translator.rubygems_to_gentoo('ruby-debug')            # 'ruby-debug' (NOT 'debug')
+translator.rubygems_to_gentoo('debug')                 # 'debug'
+translator.rubygems_to_gentoo('iso-639')               # 'iso639' (trailing digits fixed)
 ```
 
-Known mappings for common gems are built-in, and the translator can preload existing `dev-ruby/*` packages from Gentoo repositories.
+**Handling mismatches**: When a gem name differs from an existing Gentoo package (e.g., Gentoo has `dev-ruby/foo` but the gem is `ruby-foo`), use the `.sys` patching mechanism to configure dependency mappings, similar to PyPI's approach with `sci-libs/torch`.
+
+Known mappings for Rails ecosystem gems (like `active_support` → `activesupport`) are built-in. Additional mappings are extracted from Gentoo's `metadata.xml` files.
 
 ### RubyGems Filters
 
