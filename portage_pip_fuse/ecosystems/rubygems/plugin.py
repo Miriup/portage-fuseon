@@ -624,18 +624,50 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
         - 1.0.0.beta1 -> 1.0.0_beta1
         - 1.0.0.rc1 -> 1.0.0_rc1
         - 1.0.0.alpha -> 1.0.0_alpha
+        - 1.0.0.alpha.pre.4 -> 1.0.0_alpha_pre_p4 (standalone numbers become _p)
         """
         import re
 
-        version = gem_version
+        # Standard Gentoo suffix names
+        standard_suffixes = {'alpha', 'beta', 'pre', 'rc'}
 
-        # Replace pre-release markers
-        version = re.sub(r'\.pre(\d*)', r'_pre\1', version)
-        version = re.sub(r'\.beta(\d*)', r'_beta\1', version)
-        version = re.sub(r'\.alpha(\d*)', r'_alpha\1', version)
-        version = re.sub(r'\.rc(\d*)', r'_rc\1', version)
+        # Split into base version and suffix
+        match = re.match(r'^(\d+(?:\.\d+)*)(.*)$', gem_version)
+        if not match:
+            return gem_version
 
-        return version
+        base, suffix = match.groups()
+
+        if not suffix:
+            return base
+
+        # Parse suffix components
+        suffix = suffix.lstrip('.')
+        if not suffix:
+            return base
+
+        components = suffix.split('.')
+
+        # Build the Gentoo suffix
+        gentoo_suffix = ''
+        for comp in components:
+            comp_lower = comp.lower()
+
+            if comp_lower in standard_suffixes:
+                gentoo_suffix += f'_{comp_lower}'
+            elif comp.isdigit():
+                # Standalone number - treat as patchlevel
+                gentoo_suffix += f'_p{comp}'
+            else:
+                # Check for combined suffix like 'alpha1', 'beta2'
+                m = re.match(r'^([a-z]+)(\d+)$', comp_lower)
+                if m and m.group(1) in standard_suffixes:
+                    gentoo_suffix += f'_{m.group(1)}{m.group(2)}'
+                else:
+                    # Non-standard suffix - keep as-is (may produce invalid version)
+                    gentoo_suffix += f'.{comp}'
+
+        return base + gentoo_suffix
 
     def _translate_license(self, licenses: List[str]) -> str:
         """

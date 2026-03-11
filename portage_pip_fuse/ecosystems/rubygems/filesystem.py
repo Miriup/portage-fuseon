@@ -30,6 +30,7 @@ from .filters import (
     GemSourceFilter,
     PlatformFilter,
     PreReleaseFilter,
+    GentooVersionFilter,
     VersionFilterChain,
 )
 
@@ -138,6 +139,11 @@ class PortageGemFS(Operations):
         disabled_filters = set(filter_config.get('disabled_filters', []))
 
         filters = []
+
+        # Gentoo version format filter (always enabled - non-translatable versions
+        # would produce invalid ebuild names)
+        if 'gentoo-version' not in disabled_filters:
+            filters.append(GentooVersionFilter())
 
         # Ruby compatibility filter
         if 'ruby-compat' not in disabled_filters:
@@ -296,7 +302,8 @@ cache-formats = md5-dict
             gentoo_versions = []
             for v in versions:
                 gentoo_v = self._translate_gem_version(v)
-                gentoo_versions.append(gentoo_v)
+                if gentoo_v is not None:
+                    gentoo_versions.append(gentoo_v)
 
             # Cache the result
             self._versions_cache[cache_key] = (gentoo_versions, time.time())
@@ -307,7 +314,7 @@ cache-formats = md5-dict
             logger.error(f"Error getting versions for {gem_name}: {e}")
             return []
 
-    def _translate_gem_version(self, gem_version: str) -> str:
+    def _translate_gem_version(self, gem_version: str) -> Optional[str]:
         """
         Translate gem version string to Gentoo format.
 
@@ -316,6 +323,13 @@ cache-formats = md5-dict
         - .beta -> _beta
         - .pre -> _pre
         - .rc -> _rc
+
+        Handles compound suffixes (reversibly):
+        - .alpha.pre.4 -> _alpha_pre_p4 (standalone numbers become _p)
+        - .beta1.1 -> _beta1_p1
+        - .alpha.pre4 -> _alpha_pre4 (attached numbers stay attached)
+
+        Returns None for versions with non-standard suffixes.
 
         Examples:
             >>> fs = PortageGemFS.__new__(PortageGemFS)
@@ -331,16 +345,63 @@ cache-formats = md5-dict
             '5.0.0_pre'
             >>> fs._translate_gem_version('1.2.3.alpha')
             '1.2.3_alpha'
+            >>> fs._translate_gem_version('2.0.0.alpha.pre.4')
+            '2.0.0_alpha_pre_p4'
+            >>> fs._translate_gem_version('5.0.0.beta1.1')
+            '5.0.0_beta1_p1'
+            >>> fs._translate_gem_version('5.0.0.racecar1') is None
+            True
+            >>> fs._translate_gem_version('2.0.0.alpha.pre4')
+            '2.0.0_alpha_pre4'
         """
-        version = gem_version
+        # Standard Gentoo suffix names (excluding 'p' as it's only for patchlevel)
+        standard_suffixes = {'alpha', 'beta', 'pre', 'rc'}
 
-        # Replace pre-release markers
-        version = re.sub(r'\.alpha(\d*)', r'_alpha\1', version)
-        version = re.sub(r'\.beta(\d*)', r'_beta\1', version)
-        version = re.sub(r'\.pre(\d*)', r'_pre\1', version)
-        version = re.sub(r'\.rc(\d*)', r'_rc\1', version)
+        # Split into base version (numbers.numbers...) and suffix
+        match = re.match(r'^(\d+(?:\.\d+)*)(.*)$', gem_version)
+        if not match:
+            return None
 
-        return version
+        base, suffix = match.groups()
+
+        if not suffix:
+            return base  # Pure numeric version
+
+        # Parse suffix components
+        suffix = suffix.lstrip('.')
+        if not suffix:
+            return base
+
+        components = suffix.split('.')
+
+        # Build the Gentoo suffix
+        gentoo_suffix = ''
+        i = 0
+        while i < len(components):
+            comp = components[i].lower()
+
+            if comp in standard_suffixes:
+                gentoo_suffix += f'_{comp}'
+                i += 1
+            elif comp.isdigit():
+                # Standalone number - treat as patchlevel (_p)
+                gentoo_suffix += f'_p{comp}'
+                i += 1
+            elif re.match(r'^([a-z]+)(\d+)$', comp):
+                # Combined suffix like 'alpha1', 'beta2', 'pre4'
+                m = re.match(r'^([a-z]+)(\d+)$', comp)
+                name, num = m.groups()
+                if name in standard_suffixes:
+                    gentoo_suffix += f'_{name}{num}'
+                    i += 1
+                else:
+                    # Non-standard suffix
+                    return None
+            else:
+                # Non-standard suffix
+                return None
+
+        return base + gentoo_suffix
 
     def _gentoo_to_gem_version(self, gentoo_version: str) -> str:
         """
@@ -360,10 +421,20 @@ cache-formats = md5-dict
             '4.0.0.rc1'
             >>> fs._gentoo_to_gem_version('5.0.0_pre')
             '5.0.0.pre'
+            >>> fs._gentoo_to_gem_version('2.0.0_alpha_pre_p4')
+            '2.0.0.alpha.pre.4'
+            >>> fs._gentoo_to_gem_version('5.0.0_beta1_p1')
+            '5.0.0.beta1.1'
+            >>> fs._gentoo_to_gem_version('2.0.0_alpha_pre4')
+            '2.0.0.alpha.pre4'
         """
         version = gentoo_version
 
+        # Reverse the patchlevel suffix first (e.g., _p1 -> .1)
+        version = re.sub(r'_p(\d+)', r'.\1', version)
+
         # Reverse the pre-release marker translation
+        # Handle suffixes with and without numbers
         version = re.sub(r'_alpha(\d*)', r'.alpha\1', version)
         version = re.sub(r'_beta(\d*)', r'.beta\1', version)
         version = re.sub(r'_pre(\d*)', r'.pre\1', version)
