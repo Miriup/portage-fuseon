@@ -488,8 +488,12 @@ cache-formats = md5-dict
         # Get gem version (translate back from Gentoo format)
         gem_version = self._gentoo_to_gem_version(version)
 
-        # Get package metadata
-        info = self._get_package_info(gem_name)
+        # Get version-specific metadata (includes correct dependencies for THIS version)
+        info = self.metadata_provider.get_version_info(gem_name, gem_version)
+
+        if not info:
+            # Fall back to package-level info (may have wrong deps, but better than nothing)
+            info = self._get_package_info(gem_name)
 
         if not info:
             # Minimal ebuild if no metadata available
