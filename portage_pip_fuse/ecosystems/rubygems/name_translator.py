@@ -12,7 +12,7 @@ Design principles:
 
 Transformations applied:
 - Lowercase normalization
-- Trailing digit separator removal (iso-639 -> iso639) for PMS compatibility
+- Trailing digit hyphen-to-underscore (iso-639 -> iso_639) for PMS compatibility
 - Underscores preserved (valid per PMS 3.1.2)
 
 Copyright (C) 2026 Dirk Tilger <dirk@systemication.com>
@@ -88,8 +88,9 @@ class RubyGemsNameTranslator:
         'websocket-driver': 'websocket-driver',
         'websocket-extensions': 'websocket-extensions',
 
-        # Gems with trailing numbers (conflict with Gentoo version parsing)
-        'iso-639': 'iso639',
+        # Note: Gems with trailing numbers (e.g., iso-639) are auto-transformed
+        # to use underscore (iso_639) per _apply_translation_rules().
+        # Only list here if you need a different mapping.
         'oauth2': 'oauth2',
         'net-http2': 'net-http2',
     }
@@ -182,7 +183,7 @@ class RubyGemsNameTranslator:
             >>> translator.rubygems_to_gentoo('rspec-core')
             'rspec-core'
             >>> translator.rubygems_to_gentoo('iso-639')
-            'iso639'
+            'iso_639'
         """
         gem_name = gem_name.strip()
 
@@ -194,13 +195,18 @@ class RubyGemsNameTranslator:
         # Apply minimal translation rules (fix PMS-incompatible names only)
         gentoo_name = self._apply_translation_rules(gem_name)
 
+        # If we transformed the name, register the mapping for reverse lookup
+        if gentoo_name != gem_name:
+            self._gem_to_gentoo[gem_lower] = gentoo_name
+            self._gentoo_to_gem[gentoo_name.lower()] = gem_name
+
         return gentoo_name
 
     def gentoo_to_rubygems(self, gentoo_name: str, hint: Optional[str] = None) -> str:
         """
         Translate Gentoo package name to RubyGems name.
 
-        Since we now preserve original case, this is typically identity.
+        Reverses the PMS transformations applied in rubygems_to_gentoo().
 
         Args:
             gentoo_name: Gentoo package name (without category)
@@ -215,15 +221,39 @@ class RubyGemsNameTranslator:
             'RedCloth'
             >>> translator.gentoo_to_rubygems('rspec-core')
             'rspec-core'
+            >>> # For transformed names, must call rubygems_to_gentoo first to register mapping
+            >>> _ = translator.rubygems_to_gentoo('http-2')  # Registers http_2 -> http-2
+            >>> translator.gentoo_to_rubygems('http_2')
+            'http-2'
+            >>> # Original underscores stay as-is
+            >>> translator.gentoo_to_rubygems('rubocop-ruby3_2')
+            'rubocop-ruby3_2'
         """
         gentoo_name = gentoo_name.strip()
 
         # Check known mappings first (lowercase key lookup)
+        # This includes transformations registered by rubygems_to_gentoo()
         gentoo_lower = gentoo_name.lower()
         if gentoo_lower in self._gentoo_to_gem:
             return self._gentoo_to_gem[gentoo_lower]
 
-        # Return as-is since we preserve original case
+        # No mapping found - return as-is (the underscore is original, not a transformation)
+        # e.g., rubocop-ruby3_2 stays rubocop-ruby3_2
+        return gentoo_name
+
+    def _reverse_translation_rules(self, gentoo_name: str) -> str:
+        """
+        Reverse the PMS transformations to get original gem name.
+
+        Converts underscore before trailing digits back to hyphen.
+        E.g., http_2 -> http-2, iso_639 -> iso-639
+        """
+        # Check for underscore before trailing digits
+        match = re.search(r'_(\d+)$', gentoo_name)
+        if match:
+            # Replace underscore with hyphen
+            return gentoo_name[:match.start()] + '-' + match.group(1)
+
         return gentoo_name
 
     def _apply_translation_rules(self, gem_name: str) -> str:
@@ -233,7 +263,7 @@ class RubyGemsNameTranslator:
         Rules:
         1. Preserve original case (PMS allows [A-Za-z0-9+_-])
         2. Remove leading/trailing hyphens or underscores
-        3. Fix names ending with hyphen-digits (e.g., iso-639 -> iso639)
+        3. Fix names ending with hyphen-digits (e.g., iso-639 -> iso_639)
            These conflict with Gentoo's version parsing.
         """
         import re
@@ -247,12 +277,15 @@ class RubyGemsNameTranslator:
         while '--' in name:
             name = name.replace('--', '-')
 
-        # Fix names that end with hyphen-digits (e.g., iso-639 -> iso639)
+        # Fix names that end with hyphen-digits (e.g., iso-639 -> iso_639)
         # These conflict with Gentoo's version parsing (looks like a version suffix)
+        # Per PMS 3.1.2: "A package name must not end in a hyphen followed by digits"
+        # We use underscore instead of removing the hyphen to avoid collisions
+        # (e.g., http-2 and http2 are different gems)
         match = re.search(r'-(\d+)$', name)
         if match:
-            # Remove the hyphen before the trailing digits
-            name = name[:match.start()] + match.group(1)
+            # Replace the hyphen with underscore before trailing digits
+            name = name[:match.start()] + '_' + match.group(1)
 
         return name
 
