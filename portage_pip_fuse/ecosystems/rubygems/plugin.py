@@ -9,6 +9,7 @@ Licensed under GPL-2.0
 """
 
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
 from portage_pip_fuse.plugin import (
@@ -376,6 +377,21 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
         if dev_deps:
             iuse_flags.append('debug')
 
+        # Determine KEYWORDS - empty for pre-releases (requires explicit keywording)
+        is_prerelease = package_info.get('prerelease', False)
+        if not is_prerelease:
+            # Also check version string for pre-release patterns
+            prerelease_patterns = [
+                r'\.alpha\d*$', r'\.beta\d*$', r'\.rc\d*$', r'\.pre\d*$',
+                r'\.alpha\.', r'\.beta\.', r'\.rc\.', r'\.pre\.',
+            ]
+            for pattern in prerelease_patterns:
+                if re.search(pattern, version, re.IGNORECASE):
+                    is_prerelease = True
+                    break
+
+        keywords = '' if is_prerelease else '~amd64 ~arm64'
+
         # Build ebuild
         lines = [
             "# Copyright 2026 Gentoo Authors",
@@ -405,7 +421,7 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
             "",
             f'LICENSE="{licenses}"',
             'SLOT="0"',
-            'KEYWORDS="~amd64 ~arm64"',
+            f'KEYWORDS="{keywords}"',
         ])
 
         # Add IUSE if we have optional dependencies

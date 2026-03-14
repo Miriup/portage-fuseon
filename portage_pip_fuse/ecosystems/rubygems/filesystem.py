@@ -511,6 +511,19 @@ cache-formats = md5-dict
         gem_version = self._gentoo_to_gem_version(version)
         use_ruby = ' '.join(self.use_ruby)
 
+        # Check version string for pre-release patterns
+        is_prerelease = False
+        prerelease_patterns = [
+            r'\.alpha\d*$', r'\.beta\d*$', r'\.rc\d*$', r'\.pre\d*$',
+            r'\.alpha\.', r'\.beta\.', r'\.rc\.', r'\.pre\.',
+        ]
+        for pattern in prerelease_patterns:
+            if re.search(pattern, gem_version, re.IGNORECASE):
+                is_prerelease = True
+                break
+
+        keywords = '' if is_prerelease else '~amd64 ~arm64'
+
         return f'''# Copyright 2026 Gentoo Authors
 # Distributed under the terms of the GNU General Public License v2
 
@@ -528,7 +541,7 @@ SRC_URI="https://rubygems.org/gems/{gem_name}-{gem_version}.gem"
 
 LICENSE="MIT"
 SLOT="0"
-KEYWORDS="~amd64 ~arm64"
+KEYWORDS="{keywords}"
 '''
 
     def _generate_metadata_xml(self, gentoo_name: str, gem_name: str) -> str:
