@@ -750,8 +750,8 @@ cache-formats = md5-dict
         """
         Get platform for a specific gem version from the versions list.
 
-        This is used when version-specific metadata isn't available but we
-        still need to determine the platform for KEYWORDS generation.
+        When multiple platforms exist for the same version, prefers 'ruby'
+        (pure Ruby/source) over platform-specific variants.
 
         Args:
             gem_name: Name of the gem
@@ -762,9 +762,16 @@ cache-formats = md5-dict
         """
         try:
             versions_data = self.metadata_provider.get_versions_metadata(gem_name)
+            # Collect all platforms for this version, prefer 'ruby'
+            found_platform = None
             for v in versions_data:
                 if isinstance(v, dict) and v.get('number') == gem_version:
-                    return v.get('platform', 'ruby')
+                    platform = v.get('platform', 'ruby')
+                    if platform == 'ruby':
+                        return 'ruby'  # Found ruby, use it immediately
+                    if found_platform is None:
+                        found_platform = platform  # Keep first non-ruby as fallback
+            return found_platform
         except Exception as e:
             logger.debug(f"Error getting platform for {gem_name}-{gem_version}: {e}")
         return None
@@ -780,13 +787,11 @@ cache-formats = md5-dict
         # Get version-specific metadata (includes correct dependencies for THIS version)
         info = self.metadata_provider.get_version_info(gem_name, gem_version)
 
-        # Extract platform from version metadata (needed for KEYWORDS)
-        platform = None
-        if info:
-            platform = info.get('platform', 'ruby')
-        else:
-            # Try to get platform from versions list
-            platform = self._get_version_platform(gem_name, gem_version)
+        # Get platform from versions list, NOT from get_version_info()
+        # The v2 API returns the first platform alphabetically (often 'java'),
+        # but _get_package_versions filters to prefer 'ruby' platform.
+        # We must use the same source for consistency.
+        platform = self._get_version_platform(gem_name, gem_version) or 'ruby'
 
         if not info:
             # Fall back to package-level info (may have wrong deps, but better than nothing)
