@@ -2352,11 +2352,12 @@ Debug subcommands:
   deps <gem>        Show dependencies for a gem
 
 Examples:
-  %(prog)s versions faraday          # List all versions
-  %(prog)s info rails                # Show rails metadata
-  %(prog)s translate iso-639         # Show name translation
-  %(prog)s filter nokogiri           # Show filtered versions
-  %(prog)s deps rails                # Show dependencies
+  %(prog)s versions faraday             # List all versions
+  %(prog)s versions grpc --platforms    # Show platform variants per version
+  %(prog)s info rails                   # Show rails metadata
+  %(prog)s translate iso-639            # Show name translation
+  %(prog)s filter nokogiri              # Show filtered versions
+  %(prog)s deps rails                   # Show dependencies
         ''',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -2391,6 +2392,12 @@ Examples:
         help='USE_RUBY targets for filter command (default: ruby32 ruby33)'
     )
 
+    parser.add_argument(
+        '--platforms',
+        action='store_true',
+        help='Show platform variants for each version (versions command only)'
+    )
+
     # Parse args (skip 'debug' from argv)
     debug_argv = [arg for arg in sys.argv[1:] if arg != 'debug']
 
@@ -2414,7 +2421,7 @@ Examples:
     translator = create_rubygems_translator()
 
     if args.debug_command == 'versions':
-        return _debug_versions(provider, args.name, args.json)
+        return _debug_versions(provider, args.name, args.json, args.platforms)
     elif args.debug_command == 'info':
         return _debug_info(provider, args.name, args.version, args.json)
     elif args.debug_command == 'translate':
@@ -2428,11 +2435,51 @@ Examples:
     return 0
 
 
-def _debug_versions(provider, gem_name, as_json):
+def _debug_versions(provider, gem_name, as_json, show_platforms=False):
     """Show available versions for a gem."""
     import json
     from packaging.version import Version
 
+    if show_platforms:
+        # Get full metadata with platforms
+        versions_data = provider.get_versions_metadata(gem_name)
+        if not versions_data:
+            print(f"No versions found for '{gem_name}'")
+            return 1
+
+        # Group by version number to show all platforms
+        version_platforms = {}
+        for v in versions_data:
+            num = v.get('number', '')
+            platform = v.get('platform', 'ruby')
+            if num:
+                if num not in version_platforms:
+                    version_platforms[num] = []
+                version_platforms[num].append(platform)
+
+        # Sort version numbers
+        def version_key(v):
+            try:
+                return (1, Version(v))
+            except Exception:
+                return (0, v)
+
+        sorted_versions = sorted(version_platforms.keys(), key=version_key, reverse=True)
+
+        if as_json:
+            print(json.dumps({'gem': gem_name, 'versions': version_platforms}, indent=2))
+        else:
+            print(f"Versions for {gem_name} ({len(sorted_versions)} unique versions, {len(versions_data)} total with platforms):")
+            print()
+            for ver in sorted_versions:
+                platforms = version_platforms[ver]
+                if len(platforms) == 1 and platforms[0] == 'ruby':
+                    print(f"  {ver}")
+                else:
+                    print(f"  {ver}: {', '.join(sorted(platforms))}")
+        return 0
+
+    # Original behavior without platforms
     versions = provider.get_package_versions(gem_name)
 
     if not versions:
