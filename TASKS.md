@@ -59,6 +59,36 @@ dev-ruby/selectize-rails MIT,\ Apache\ License\ v2.0
 
 **Status:** Not yet reported
 
+## Refactoring Tasks
+
+### Simplify RubyGems platform handling
+
+**Current state:** Complex KEYWORDS mapping for platform-specific gems (java, x86_64-linux, etc.)
+
+**Problem:** The current implementation maps RubyGems platforms to Gentoo KEYWORDS (e.g., `java` → empty KEYWORDS, `x86_64-linux` → `~amd64`). This is overengineered.
+
+**Insight:** RubyGems platforms are analogous to Python's sdist/wheel:
+- `ruby` platform = source code (like sdist) → **what we want**
+- `x86_64-linux`, `arm64-darwin`, etc. = pre-compiled binaries (like wheels)
+- `java` = pre-compiled JVM bytecode for JRuby
+
+**Correct approach:** Since Gentoo builds from source, we should:
+1. **Only include versions with `platform='ruby'`** (source available)
+2. **Filter out all platform-specific variants** (pre-compiled binaries)
+3. Gems without a `ruby` platform variant (like `jruby-openssl`) simply don't appear
+
+This is consistent with the `source-dist` filter philosophy for PyPI.
+
+**Files to modify:**
+- `ecosystems/rubygems/filesystem.py` - Simplify `_get_package_versions()` to only include `platform='ruby'`
+- `ecosystems/rubygems/plugin.py` - Remove `platform_to_keywords()` function
+- `ecosystems/rubygems/filters.py` - Update or remove `PlatformFilter`
+- `CLAUDE.md` - Remove "Platform-to-KEYWORDS Mapping" section
+
+**Debug command:** Use `portage-gem-fuse debug versions <gem> --platforms` to see which gems have `ruby` platform variants.
+
+**Status:** Not started
+
 ## Documentation Tasks
 
 ### Add RubyGems .sys patching examples
