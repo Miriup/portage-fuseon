@@ -27,6 +27,103 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def platform_to_keywords(platform: str) -> str:
+    """
+    Map RubyGems platform to Gentoo KEYWORDS.
+
+    Philosophy: Never filter out packages. All packages should be visible
+    so users get informative errors ("no KEYWORDS") instead of cryptic
+    "checksum verification" failures.
+
+    Valid Gentoo KEYWORDS (from /var/db/repos/gentoo/profiles/arch.list):
+    - Standard Linux: amd64, arm64, arm, x86, ppc, ppc64, sparc, alpha, etc.
+    - Gentoo Prefix: arm64-macos, x64-macos (Intel), x64-solaris
+    - Historical (removed): x64-winnt, x86-winnt, x64-cygwin, x86-cygwin
+
+    Args:
+        platform: RubyGems platform string (e.g., 'ruby', 'java', 'x86_64-linux')
+
+    Returns:
+        Gentoo KEYWORDS string (e.g., '~amd64 ~arm64', or '' for unsupported)
+
+    Examples:
+        >>> platform_to_keywords('ruby')
+        '~amd64 ~arm64'
+        >>> platform_to_keywords('')
+        '~amd64 ~arm64'
+        >>> platform_to_keywords(None)
+        '~amd64 ~arm64'
+        >>> platform_to_keywords('x86_64-linux')
+        '~amd64'
+        >>> platform_to_keywords('x86_64-linux-gnu')
+        '~amd64'
+        >>> platform_to_keywords('arm64-linux')
+        '~arm64'
+        >>> platform_to_keywords('aarch64-linux')
+        '~arm64'
+        >>> platform_to_keywords('x86-linux')
+        '~x86'
+        >>> platform_to_keywords('i686-linux')
+        '~x86'
+        >>> platform_to_keywords('universal-darwin')
+        '~x64-macos ~arm64-macos'
+        >>> platform_to_keywords('x86_64-darwin')
+        '~x64-macos'
+        >>> platform_to_keywords('x86_64-darwin-20')
+        '~x64-macos'
+        >>> platform_to_keywords('arm64-darwin')
+        '~arm64-macos'
+        >>> platform_to_keywords('java')
+        ''
+        >>> platform_to_keywords('jruby')
+        ''
+        >>> platform_to_keywords('mswin64')
+        ''
+        >>> platform_to_keywords('x64-mingw32')
+        ''
+        >>> platform_to_keywords('x64-mingw-ucrt')
+        ''
+    """
+    # Pure Ruby or no platform specified - universal
+    if not platform or platform == 'ruby':
+        return '~amd64 ~arm64'
+
+    platform = platform.lower()
+
+    # macOS (Gentoo Prefix)
+    # NOTE: Gentoo uses x64-macos (not amd64-macos) for Intel Macs
+    if 'darwin' in platform:
+        if 'arm64' in platform:
+            return '~arm64-macos'
+        elif 'x86_64' in platform:
+            return '~x64-macos'
+        # 'universal' or unspecified architecture
+        return '~x64-macos ~arm64-macos'
+
+    # Linux with architecture
+    if 'linux' in platform:
+        if 'x86_64' in platform or 'amd64' in platform:
+            return '~amd64'
+        if 'arm64' in platform or 'aarch64' in platform:
+            return '~arm64'
+        if 'x86' in platform or 'i686' in platform or 'i386' in platform:
+            return '~x86'
+        # Generic linux without arch - assume common architectures
+        return '~amd64 ~arm64'
+
+    # JRuby/Java - empty KEYWORDS (visible but not installable on CRuby)
+    if platform in ('java', 'jruby'):
+        return ''
+
+    # Windows - empty KEYWORDS (no valid Gentoo keywords since 2020)
+    # x64-winnt, x86-winnt, x64-cygwin, x86-cygwin removed in commit a6296002be45
+    if any(p in platform for p in ('mswin', 'mingw', 'win32', 'win64', 'cygwin')):
+        return ''
+
+    # Unknown platform - default to common Linux architectures
+    return '~amd64 ~arm64'
+
+
 class RubyGemsMetadataProvider(MetadataProviderBase):
     """
     Metadata provider for RubyGems packages.
@@ -357,6 +454,7 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
         iuse_patches: Optional[List] = None,
         ebuild_append: Optional[Dict[str, str]] = None,
         git_source: Optional[Dict[str, Any]] = None,
+        platform: Optional[str] = None,
     ) -> str:
         """Generate ebuild content for a gem version.
 
@@ -371,6 +469,7 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
             iuse_patches: List of IUSE patches
             ebuild_append: Dict mapping phase names to code snippets
             git_source: Git source configuration {'mode', 'url', 'pattern'}
+            platform: RubyGems platform string (e.g., 'ruby', 'java', 'x86_64-linux')
         """
         # Extract info
         name = package_info.get('name', gentoo_name)
@@ -399,7 +498,12 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
             iuse_flags.append('debug')
         iuse_flags = self._apply_iuse_patches(iuse_flags, iuse_patches)
 
-        # Determine KEYWORDS - empty for pre-releases (requires explicit keywording)
+        # Determine KEYWORDS based on platform and pre-release status
+        # First, get platform-based KEYWORDS
+        gem_platform = platform or package_info.get('platform', 'ruby')
+        base_keywords = platform_to_keywords(gem_platform)
+
+        # Check for pre-release (empty KEYWORDS requires explicit keywording)
         is_prerelease = package_info.get('prerelease', False)
         if not is_prerelease:
             # Also check version string for pre-release patterns
@@ -412,11 +516,22 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
                     is_prerelease = True
                     break
 
-        # Git sources use empty KEYWORDS
+        # Determine final KEYWORDS:
+        # - Git sources: empty (live ebuild)
+        # - Pre-releases: empty (requires explicit keywording)
+        # - Platform-specific: use platform_to_keywords() result
+        keywords_comment = None
         if git_source and git_source.get('mode') == 'git':
             keywords = ''
+            keywords_comment = "# Live ebuild from git - no KEYWORDS"
+        elif is_prerelease:
+            keywords = ''
+            keywords_comment = "# Pre-release version - no KEYWORDS (requires explicit keywording)"
+        elif not base_keywords:
+            keywords = ''
+            keywords_comment = f"# Platform '{gem_platform}' - no compatible Gentoo architecture"
         else:
-            keywords = '' if is_prerelease else '~amd64 ~arm64'
+            keywords = base_keywords
 
         # Use slot override if provided, otherwise default to "0"
         slot = slot_override if slot_override else "0"
@@ -474,12 +589,12 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
         else:
             lines.append(f'SRC_URI="https://rubygems.org/gems/${{PN}}-${{PV}}.gem"')
 
-        lines.extend([
-            "",
-            f'LICENSE="{licenses}"',
-            f'SLOT="{slot}"',
-            f'KEYWORDS="{keywords}"',
-        ])
+        lines.append("")
+        lines.append(f'LICENSE="{licenses}"')
+        lines.append(f'SLOT="{slot}"')
+        if keywords_comment:
+            lines.append(keywords_comment)
+        lines.append(f'KEYWORDS="{keywords}"')
 
         # Add IUSE if we have optional dependencies
         if iuse_flags:

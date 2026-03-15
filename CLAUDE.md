@@ -708,12 +708,31 @@ Known mappings for Rails ecosystem gems (like `active_support` → `activesuppor
 
 Available filters for gem version selection:
 
-| Filter | Description |
-|--------|-------------|
-| `ruby-compat` | Filters by `required_ruby_version` against system USE_RUBY |
-| `gem-source` | Filters to gems with `.gem` files or git repositories |
-| `platform` | Excludes platform-specific gems (java, mswin, darwin) |
-| `pre-release` | Excludes alpha/beta/rc versions |
+| Filter | Description | Default |
+|--------|-------------|---------|
+| `ruby-compat` | Filters by `required_ruby_version` against system USE_RUBY | Enabled |
+| `gem-source` | Filters to gems with `.gem` files or git repositories | Enabled |
+| `gentoo-version` | Filters versions that can't be translated to PMS format | Enabled |
+| `platform` | Excludes platform-specific gems (java, mswin, darwin) | Disabled |
+| `pre-release` | Excludes alpha/beta/rc versions | Disabled |
+
+### Platform-to-KEYWORDS Mapping
+
+Platform-specific gems are NOT filtered out. Instead, they get appropriate Gentoo KEYWORDS:
+
+| RubyGems Platform | Gentoo KEYWORDS |
+|-------------------|-----------------|
+| `ruby` (pure) / empty | `~amd64 ~arm64` |
+| `x86_64-linux*` | `~amd64` |
+| `arm64-linux*` / `aarch64-linux*` | `~arm64` |
+| `x86-linux*` / `i686-linux*` | `~x86` |
+| `universal-darwin*` | `~x64-macos ~arm64-macos` |
+| `x86_64-darwin*` | `~x64-macos` |
+| `arm64-darwin*` | `~arm64-macos` |
+| `java` / `jruby` | Empty KEYWORDS (visible, not installable) |
+| `mswin*` / `mingw*` | Empty KEYWORDS (visible, not installable) |
+
+This provides better user experience: instead of cryptic "checksum verification" errors, users see clear "no KEYWORDS for your architecture" messages.
 
 ```python
 from portage_pip_fuse.ecosystems.rubygems.filters import (

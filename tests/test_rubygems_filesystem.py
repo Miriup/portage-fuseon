@@ -316,6 +316,77 @@ class TestLayoutConf:
         assert 'profile-formats = portage-2' in layout
 
 
+class TestPlatformToKeywords:
+    """Tests for RubyGems platform to Gentoo KEYWORDS mapping."""
+
+    def test_pure_ruby(self):
+        """Pure Ruby gems get universal KEYWORDS."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('ruby') == '~amd64 ~arm64'
+        assert platform_to_keywords('') == '~amd64 ~arm64'
+        assert platform_to_keywords(None) == '~amd64 ~arm64'
+
+    def test_linux_x86_64(self):
+        """x86_64-linux platforms get amd64 KEYWORDS."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('x86_64-linux') == '~amd64'
+        assert platform_to_keywords('x86_64-linux-gnu') == '~amd64'
+        assert platform_to_keywords('x86_64-linux-musl') == '~amd64'
+
+    def test_linux_arm64(self):
+        """arm64-linux platforms get arm64 KEYWORDS."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('arm64-linux') == '~arm64'
+        assert platform_to_keywords('aarch64-linux') == '~arm64'
+        assert platform_to_keywords('aarch64-linux-gnu') == '~arm64'
+
+    def test_linux_x86(self):
+        """x86-linux platforms get x86 KEYWORDS."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('x86-linux') == '~x86'
+        assert platform_to_keywords('i686-linux') == '~x86'
+        assert platform_to_keywords('i386-linux') == '~x86'
+
+    def test_macos_universal(self):
+        """Universal darwin gets both x64-macos and arm64-macos."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('universal-darwin') == '~x64-macos ~arm64-macos'
+        assert platform_to_keywords('darwin') == '~x64-macos ~arm64-macos'
+
+    def test_macos_intel(self):
+        """Intel macOS uses x64-macos (not amd64-macos)."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('x86_64-darwin') == '~x64-macos'
+        assert platform_to_keywords('x86_64-darwin-20') == '~x64-macos'
+        assert platform_to_keywords('x86_64-darwin-21') == '~x64-macos'
+
+    def test_macos_arm(self):
+        """Apple Silicon macOS uses arm64-macos."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('arm64-darwin') == '~arm64-macos'
+        assert platform_to_keywords('arm64-darwin-21') == '~arm64-macos'
+
+    def test_java_jruby(self):
+        """JRuby/Java platforms get empty KEYWORDS (visible but not installable)."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('java') == ''
+        assert platform_to_keywords('jruby') == ''
+
+    def test_windows(self):
+        """Windows platforms get empty KEYWORDS (no valid Gentoo keywords since 2020)."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('mswin64') == ''
+        assert platform_to_keywords('mswin32') == ''
+        assert platform_to_keywords('x64-mingw32') == ''
+        assert platform_to_keywords('x64-mingw-ucrt') == ''
+        assert platform_to_keywords('x86-mingw32') == ''
+
+    def test_unknown_platform(self):
+        """Unknown platforms default to common architectures."""
+        from portage_pip_fuse.ecosystems.rubygems.plugin import platform_to_keywords
+        assert platform_to_keywords('some-unknown-platform') == '~amd64 ~arm64'
+
+
 # Run doctests when module is executed
 if __name__ == '__main__':
     import doctest

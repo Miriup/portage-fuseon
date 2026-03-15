@@ -233,9 +233,11 @@ class PortageGemFS(Operations):
         if 'ruby-compat' not in disabled_filters:
             filters.append(RubyCompatFilter(use_ruby=self.use_ruby))
 
-        # Platform filter (default: enabled)
-        # Exclude java, mswin, etc.
-        if 'platform' not in disabled_filters:
+        # Platform filter: DISABLED by default
+        # Platform-specific gems now get platform-appropriate KEYWORDS instead
+        # of being filtered out. This provides better user feedback (e.g.,
+        # "no KEYWORDS for your arch" vs cryptic checksum errors)
+        if 'platform' in enabled_filters and 'platform' not in disabled_filters:
             filters.append(PlatformFilter())
 
         # Pre-release filter (default: disabled, opt-in with --filter pre-release)
@@ -733,6 +735,29 @@ cache-formats = md5-dict
             logger.error(f"Error getting info for {gem_name}: {e}")
             return None
 
+    def _get_version_platform(self, gem_name: str, gem_version: str) -> Optional[str]:
+        """
+        Get platform for a specific gem version from the versions list.
+
+        This is used when version-specific metadata isn't available but we
+        still need to determine the platform for KEYWORDS generation.
+
+        Args:
+            gem_name: Name of the gem
+            gem_version: Gem version string (not Gentoo format)
+
+        Returns:
+            Platform string (e.g., 'ruby', 'java', 'x86_64-linux') or None
+        """
+        try:
+            versions_data = self.metadata_provider.get_versions_metadata(gem_name)
+            for v in versions_data:
+                if isinstance(v, dict) and v.get('number') == gem_version:
+                    return v.get('platform', 'ruby')
+        except Exception as e:
+            logger.debug(f"Error getting platform for {gem_name}-{gem_version}: {e}")
+        return None
+
     def _generate_ebuild(self, gentoo_name: str, gem_name: str, version: str) -> str:
         """Generate ebuild content for a gem package."""
         # Get gem version (translate back from Gentoo format)
@@ -744,19 +769,32 @@ cache-formats = md5-dict
         # Get version-specific metadata (includes correct dependencies for THIS version)
         info = self.metadata_provider.get_version_info(gem_name, gem_version)
 
+        # Extract platform from version metadata (needed for KEYWORDS)
+        platform = None
+        if info:
+            platform = info.get('platform', 'ruby')
+        else:
+            # Try to get platform from versions list
+            platform = self._get_version_platform(gem_name, gem_version)
+
         if not info:
             # Fall back to package-level info (may have wrong deps, but better than nothing)
             info = self._get_package_info(gem_name)
 
         if not info:
             # Minimal ebuild if no metadata available
-            return self._generate_minimal_ebuild(gentoo_name, gem_name, version, patch_data.get('slot_override'))
+            return self._generate_minimal_ebuild(
+                gentoo_name, gem_name, version,
+                slot_override=patch_data.get('slot_override'),
+                platform=platform
+            )
 
         # Use the ebuild generator
         return self.ebuild_generator.generate_ebuild(
             package_info=info,
             version=gem_version,
             gentoo_name=gentoo_name,
+            platform=platform,
             **patch_data
         )
 
@@ -812,10 +850,17 @@ cache-formats = md5-dict
         return patch_data
 
     def _generate_minimal_ebuild(self, gentoo_name: str, gem_name: str, version: str,
-                                   slot_override: Optional[str] = None) -> str:
+                                   slot_override: Optional[str] = None,
+                                   platform: Optional[str] = None) -> str:
         """Generate minimal ebuild when metadata is unavailable."""
+        from .plugin import platform_to_keywords
+
         gem_version = self._gentoo_to_gem_version(version)
         use_ruby = ' '.join(self.use_ruby)
+        gem_platform = platform or 'ruby'
+
+        # Get platform-based KEYWORDS
+        base_keywords = platform_to_keywords(gem_platform)
 
         # Check version string for pre-release patterns
         is_prerelease = False
@@ -828,7 +873,17 @@ cache-formats = md5-dict
                 is_prerelease = True
                 break
 
-        keywords = '' if is_prerelease else '~amd64 ~arm64'
+        # Determine KEYWORDS and comment
+        keywords_comment = ""
+        if is_prerelease:
+            keywords = ''
+            keywords_comment = "# Pre-release version - no KEYWORDS (requires explicit keywording)\n"
+        elif not base_keywords:
+            keywords = ''
+            keywords_comment = f"# Platform '{gem_platform}' - no compatible Gentoo architecture\n"
+        else:
+            keywords = base_keywords
+
         slot = slot_override if slot_override else '0'
 
         return f'''# Copyright 2026 Gentoo Authors
@@ -849,7 +904,7 @@ SRC_URI="https://rubygems.org/gems/{gem_name}-{gem_version}.gem"
 
 LICENSE="MIT"
 SLOT="{slot}"
-KEYWORDS="{keywords}"
+{keywords_comment}KEYWORDS="{keywords}"
 '''
 
     def _generate_metadata_xml(self, gentoo_name: str, gem_name: str) -> str:
