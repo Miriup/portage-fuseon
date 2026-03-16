@@ -964,15 +964,28 @@ SLOT="{slot}"
         versions = self._get_package_versions(gem_name)
 
         # Build a map of version -> sha from API data
+        # When multiple platforms exist for the same version, prefer 'ruby' (pure Ruby)
+        # to match the platform selection in _get_package_versions()
         version_sha_map = {}
+        version_platform_map = {}  # Track which platform we selected
         try:
             versions_data = self.metadata_provider.get_versions_metadata(gem_name)
             for v in versions_data:
                 if isinstance(v, dict):
                     num = v.get('number', '')
                     sha = v.get('sha', '')
+                    platform = v.get('platform', 'ruby')
                     if num and sha:
-                        version_sha_map[num] = sha
+                        existing_platform = version_platform_map.get(num)
+                        if existing_platform is None:
+                            # First occurrence - store it
+                            version_sha_map[num] = sha
+                            version_platform_map[num] = platform
+                        elif platform == 'ruby' and existing_platform != 'ruby':
+                            # Prefer 'ruby' (pure Ruby) over platform-specific
+                            version_sha_map[num] = sha
+                            version_platform_map[num] = platform
+                        # Otherwise keep existing (don't overwrite ruby with platform-specific)
         except Exception:
             pass
 

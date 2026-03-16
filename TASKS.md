@@ -59,6 +59,62 @@ dev-ruby/selectize-rails MIT,\ Apache\ License\ v2.0
 
 **Status:** Not yet reported
 
+### RubyGems platform checksum mismatches
+
+**Gems affected:**
+- `io-console-0.6.0`
+- `google-protobuf-3.25.7`
+
+**Symptoms:** SHA256 checksum verification fails during emerge:
+```
+!!! Fetched file: google-protobuf-3.25.7.gem VERIFY FAILED!
+!!! Reason: Failed on SHA256 verification
+!!! Got:      a860ead0c79a4598082ef2be638e23f61602524b3d48a001f48cf33d7f8cd9a9
+!!! Expected: acc5d3c1d9a1a92be262702b506c7f7163daa5fb8eadefdffdd13dc3ac449d96
+```
+
+**Root cause:** These gems have platform-specific variants (native extensions). The RubyGems API returns all platform variants, and `_generate_manifest()` was iterating through all of them without filtering, causing the last platform's checksum to overwrite earlier ones.
+
+Example for `google-protobuf-3.25.7`:
+- `ruby` platform SHA: `a860ead0c79a4598...` (correct - what gets downloaded)
+- `aarch64-linux` SHA: `acc5d3c1d9a1a92b...` (was last in API response, overwrote the correct one)
+
+**Fix applied:** Updated `_generate_manifest()` in `filesystem.py` to use the same platform preference logic as `_get_package_versions()` - prefer `ruby` platform over platform-specific variants.
+
+**Workaround applied:** Can now be removed from `/etc/portage/package.mask/rubygems`:
+```
+=dev-ruby/io-console-0.6.0
+```
+
+**Status:** ✅ Fixed
+
+### SRC_URI uses wrong name for translated packages (iso_639)
+
+**Gem affected:** `iso-639` (translated to Gentoo package `iso_639`)
+
+**Symptoms:**
+```
+!!! Fetched file: iso_639-0.3.8.gem VERIFY FAILED!
+!!! Reason: Insufficient data for checksum verification
+```
+
+**Root cause:** The ebuild generator used `${PN}` (Gentoo package name) for SRC_URI, but for translated packages this is wrong:
+- Package name: `iso_639` (underscore)
+- Actual gem file: `iso-639-0.3.8.gem` (hyphen)
+- Generated SRC_URI: `iso_639-0.3.8.gem` (wrong!)
+- Manifest entry: `iso-639-0.3.8.gem` (correct)
+
+**Fix applied:** Changed `plugin.py` to use the original gem name in SRC_URI instead of `${PN}`:
+```python
+# Before (buggy):
+lines.append(f'SRC_URI="https://rubygems.org/gems/${{PN}}-${{PV}}.gem"')
+
+# After (fixed):
+lines.append(f'SRC_URI="https://rubygems.org/gems/{name}-{version}.gem"')
+```
+
+**Status:** ✅ Fixed
+
 ## Refactoring Tasks
 
 ### Simplify RubyGems platform handling

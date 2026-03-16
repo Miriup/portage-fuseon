@@ -585,11 +585,13 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
         ])
 
         # SRC_URI depends on source type
+        # Use the original gem name (not gentoo_name) for the URL
+        # e.g., gem 'iso-639' → package 'iso_639' but URL uses 'iso-639'
         if git_source and git_source.get('mode') == 'git':
             # Git sources don't need SRC_URI
             pass
         else:
-            lines.append(f'SRC_URI="https://rubygems.org/gems/${{PN}}-${{PV}}.gem"')
+            lines.append(f'SRC_URI="https://rubygems.org/gems/{name}-{version}.gem"')
 
         lines.append("")
         lines.append(f'LICENSE="{licenses}"')
