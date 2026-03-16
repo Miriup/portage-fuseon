@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "portage-fuse"
+name = "portage-fuseon"
 version = "0.1.0"
 description = "A FUSE-based filesystem adapter that bridges package managers (PyPI, RubyGems) with Gentoo portage"
 readme = "README.md"

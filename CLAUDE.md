@@ -1,6 +1,6 @@
-# Coding Style Guide for portage-fuse
+# Coding Style Guide for portage-fuseon
 
-This document outlines the coding style and development practices for the portage-fuse project (formerly portage-pip-fuse).
+This document outlines the coding style and development practices for the portage-fuseon project (formerly portage-pip-fuse, portage-fuse).
 
 ## Multi-Ecosystem Architecture
 

@@ -100,4 +100,8 @@ This is consistent with the `source-dist` filter philosophy for PyPI.
 
 **Context:** The .sys patching mechanism is currently documented with PyPI examples only. With the simplified name translation (exact gem names, no heuristic matching), users will need to use .sys patches for name mismatches between gems and existing Gentoo packages.
 
-**Status:** Not started
+**Status:** Partially completed
+- `README.md` updated with RubyGems patching examples
+- `docs/rubygems.md` created with comprehensive patching documentation
+- `docs/dependency-patching.md` still needs RubyGems examples added
+- `docs/build-error-fixes.md` still needs RubyGems section
