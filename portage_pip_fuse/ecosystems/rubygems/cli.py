@@ -177,10 +177,6 @@ def _generate_virtual_ebuild(
     Returns:
         Complete ebuild content
     """
-    # Determine USE_RUBY dynamically from eclass
-    from .ruby_targets import get_all_ruby_impls
-    use_ruby = ' '.join(get_all_ruby_impls())
-
     # Build RDEPEND (skip platform-specific gems - Gentoo builds from source)
     rdepend_lines = []
     seen_gems = set()  # Avoid duplicates when same gem appears with/without platform
@@ -209,10 +205,6 @@ def _generate_virtual_ebuild(
 
 EAPI=8
 
-USE_RUBY="{use_ruby}"
-
-inherit ruby-ng
-
 DESCRIPTION="Virtual package for {project_name} gem dependencies"
 HOMEPAGE=""
 SRC_URI=""
@@ -226,10 +218,8 @@ RDEPEND="
 {rdepend}
 "
 
-ruby_add_rdepend "${{RDEPEND}}"
-
-src_unpack() {{
-\teinfo "This is a metapackage that only pulls in dependencies for {project_name}."
+pkg_pretend() {{
+\teinfo "This is a metapackage that pulls in dependencies for {project_name}."
 \teinfo "It does not install any files itself."
 }}
 '''
