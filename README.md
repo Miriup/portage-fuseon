@@ -328,8 +328,9 @@ isort portage_pip_fuse
 
 ## Official Transliterations
 
-- Cyrillic: **Портидж Фюжн** — because unlike a certain German techno festival at a former Soviet airfield, we transliterate what we actually say, not what we spell.
-- Arabic: **بورتيدج فيوجن**
+- Greek: **Πορτίτζ φύζεον**
+- Cyrillic: **Портидж фюзеон** — because unlike a certain German techno festival at a former Soviet airfield, we transliterate what we actually say, not what we spell.
+- Arabic: **بُورتِيدْج فيُوزِيئُون**
 
 ## License
 
