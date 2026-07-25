@@ -728,3 +728,62 @@ def max_satisfying(
             best_text = text
 
     return best_text
+
+
+def min_satisfying_major(range_text: str) -> Optional[int]:
+    """
+    Return the lowest major version a range can admit.
+
+    Used to turn ``engines.node`` into a portage dependency floor. It is derived
+    from the range itself rather than from whatever Node happens to be installed:
+    a package declaring ``>=10`` genuinely works on Node 10, and pinning it to
+    the build host's Node 22 would make the ebuild claim a requirement upstream
+    never stated.
+
+    Within one comparator set the binding floor is the *highest* lower bound;
+    across alternatives, which are disjunctive, it is the *lowest* of those.
+
+    Args:
+        range_text: npm range expression
+
+    Returns:
+        Lowest admissible major version, or None if the range is invalid.
+        Returns 0 when the range has no lower bound at all.
+
+    Examples:
+        >>> min_satisfying_major('>=10')
+        10
+        >>> min_satisfying_major('>=14.17')
+        14
+        >>> min_satisfying_major('^18.18.0 || ^20.9.0 || >=21.1.0')
+        18
+        >>> min_satisfying_major('^12.0.0 || >= 14.0.0')
+        12
+        >>> min_satisfying_major('0.4.x')
+        0
+        >>> min_satisfying_major('>=0.10.0')
+        0
+        >>> min_satisfying_major('*')
+        0
+        >>> min_satisfying_major('>=1.0.0 <2.0.0')
+        1
+        >>> min_satisfying_major('not a range') is None
+        True
+    """
+    alternatives = parse_range(range_text)
+    if alternatives is None:
+        return None
+
+    floors = []
+    for comparators in alternatives:
+        lower = None
+        for comparator in comparators:
+            if comparator.operator not in ('>=', '>', '='):
+                continue
+            if comparator.version is None:
+                continue
+            if lower is None or compare(comparator.version, lower) > 0:
+                lower = comparator.version
+        floors.append(0 if lower is None else lower.major)
+
+    return min(floors) if floors else 0

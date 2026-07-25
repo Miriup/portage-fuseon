@@ -18,6 +18,6 @@ Licensed under GPL-2.0
 from typing import List
 
 # List of available ecosystems
-AVAILABLE_ECOSYSTEMS: List[str] = ['pypi', 'rubygems']
+AVAILABLE_ECOSYSTEMS: List[str] = ['pypi', 'rubygems', 'npm']
 
 __all__ = ['AVAILABLE_ECOSYSTEMS']
