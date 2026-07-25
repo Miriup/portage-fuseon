@@ -176,9 +176,9 @@ class JSONCache:
             if now - path.stat().st_mtime >= self.ttl:
                 path.unlink(missing_ok=True)
                 return None
-            with path.open('r') as handle:
+            with path.open('r', encoding='utf-8') as handle:
                 data = json.load(handle)
-        except (json.JSONDecodeError, OSError) as exc:
+        except (json.JSONDecodeError, OSError, KeyError) as exc:
             logger.debug(f"Discarding unusable cache entry {key}: {exc}")
             try:
                 path.unlink(missing_ok=True)
@@ -207,10 +207,10 @@ class JSONCache:
         path = self.path_for(key)
         temp_path = path.with_suffix('.tmp')
         try:
-            with temp_path.open('w') as handle:
+            with temp_path.open('w', encoding='utf-8') as handle:
                 json.dump(data, handle)
             temp_path.replace(path)
-        except OSError as exc:
+        except (OSError, TypeError) as exc:
             logger.warning(f"Failed to cache {key}: {exc}")
             try:
                 temp_path.unlink(missing_ok=True)
