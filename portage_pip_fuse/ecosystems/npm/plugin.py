@@ -101,6 +101,10 @@ class NpmMetadataProvider(MetadataProviderBase):
         base = find_cache_dir(cache_dir)
         self.cache_dir = base / 'npm' if hasattr(base, '__truediv__') else base
         self._packuments = JSONCache(self.cache_dir, ttl=cache_ttl)
+        # Absent packages are remembered in their own directory. Keeping them
+        # beside the real packuments made them show up in list_packages(), so a
+        # single failed lookup left a phantom package directory in the overlay.
+        self._missing = JSONCache(self.cache_dir / 'missing', ttl=cache_ttl)
         self._manifests = JSONCache(self.cache_dir / 'manifests',
                                     ttl=IMMUTABLE_CACHE_TTL)
         self._sizes = JSONCache(self.cache_dir / 'sizes',
@@ -158,11 +162,14 @@ class NpmMetadataProvider(MetadataProviderBase):
         if cached is not None:
             return cached or None
 
+        if self._missing.get(name) is not None:
+            return None
+
         document = self._fetch(name)
         if document is None:
-            # Cache the negative result too; a missing package stays missing for
-            # at least the TTL, and FUSE listings retry aggressively.
-            self._packuments.set(name, {})
+            # Remembered so a FUSE listing, which retries aggressively, does not
+            # re-query the registry for every stat of a path that does not exist.
+            self._missing.set(name, {'missing': True})
             return None
 
         self._packuments.set(name, document)

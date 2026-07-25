@@ -1987,6 +1987,75 @@ For subcommand help:
         return 1
 
 
+def main_npm():
+    """
+    Entry point for portage-npm-fuse.
+
+    A thin dispatcher: unlike the RubyGems commands, which live in this module,
+    everything npm-specific is in portage_pip_fuse.ecosystems.npm.cli. This file
+    already carries two ecosystems and is long enough.
+    """
+    from portage_pip_fuse.ecosystems.npm import cli as npm_cli
+
+    handlers = {
+        'mount': npm_cli.mount_command,
+        'unmount': npm_cli.unmount_command,
+        'install': npm_cli.install_command,
+        'npm': npm_cli.npm_command,
+        'npx': npm_cli.npx_command,
+        'debug': npm_cli.debug_command,
+    }
+
+    parser = argparse.ArgumentParser(
+        prog='portage-npm-fuse',
+        description='FUSE filesystem bridging npm packages to Gentoo portage',
+        epilog="""
+Subcommands:
+  mount     Mount the npm FUSE overlay
+  unmount   Unmount the overlay
+  install   Create the /etc/portage/repos.conf entry
+  npm       Translate npm install into emerge
+  npx       Show how to install and run a command-providing package
+  debug     Inspect metadata, translation and filtering
+
+Examples:
+  %(prog)s install                       # Register the overlay with portage
+  %(prog)s mount                         # Mount at /var/db/repos/npm
+  %(prog)s npm install chalk             # emerge dev-nodejs/chalk
+  %(prog)s npm install chalk@4.1.2       # emerge ~dev-nodejs/chalk-4.1.2
+  %(prog)s npm install                   # From package-lock.json, as a set
+  %(prog)s debug translate @vue/cli-service
+  %(prog)s debug filter typescript       # Why versions are hidden
+  %(prog)s debug node                    # Detected Node versions
+
+For subcommand help:
+  %(prog)s <subcommand> --help
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('subcommand', nargs='?', choices=sorted(handlers),
+                        help='Subcommand to run')
+    parser.add_argument('--version', action='version',
+                        version='%(prog)s ' + npm_cli.VERSION)
+
+    if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'):
+        parser.print_help()
+        return 0
+
+    if sys.argv[1] == '--version':
+        print('portage-npm-fuse %s' % npm_cli.VERSION)
+        return 0
+
+    subcommand = sys.argv[1]
+    handler = handlers.get(subcommand)
+    if handler is None:
+        print('Unknown subcommand: %s' % subcommand, file=sys.stderr)
+        parser.print_help()
+        return 1
+
+    return handler()
+
+
 def rubygems_mount_command():
     """Handle mount subcommand for RubyGems."""
     from portage_pip_fuse.plugin import PluginRegistry, ensure_plugins_discovered

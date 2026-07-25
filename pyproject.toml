@@ -58,6 +58,7 @@ portage-pip-fuse = "portage_pip_fuse.cli:main"
 # New ecosystem-specific entry points
 portage-pypi-fuse = "portage_pip_fuse.cli:main_pypi"
 portage-gem-fuse = "portage_pip_fuse.cli:main_rubygems"
+portage-npm-fuse = "portage_pip_fuse.cli:main_npm"
 
 [tool.setuptools.packages.find]
 where = ["."]
