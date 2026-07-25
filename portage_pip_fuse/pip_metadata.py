@@ -46,6 +46,7 @@ try:
 except ImportError:
     HAS_PACKAGING = False
 
+from portage_pip_fuse import gentoo_license
 from portage_pip_fuse import pms_version
 from portage_pip_fuse import pypi_version as pypi_version_mod
 from portage_pip_fuse.constants import find_cache_dir, HTTP_TIMEOUT
@@ -1036,33 +1037,10 @@ class EbuildDataExtractor:
         self.pypi_extractor = PyPIMetadataExtractor(cache_dir=cache_dir)
         self.name_translation_store = name_translation_store
 
-        # PyPI to Gentoo license mapping
-        self.license_map = {
-            'MIT': 'MIT',
-            'MIT License': 'MIT', 
-            'Apache-2.0': 'Apache-2.0',
-            'Apache 2.0': 'Apache-2.0',
-            'Apache License 2.0': 'Apache-2.0',
-            'Apache Software License': 'Apache-2.0',
-            'BSD': 'BSD',
-            'BSD License': 'BSD',
-            'BSD-2-Clause': 'BSD-2',
-            'BSD-3-Clause': 'BSD',
-            'GPL-2.0': 'GPL-2',
-            'GPL-3.0': 'GPL-3', 
-            'GPL-2.0+': 'GPL-2+',
-            'GPL-3.0+': 'GPL-3+',
-            'GNU General Public License v2': 'GPL-2+',
-            'GNU General Public License v3': 'GPL-3+',
-            'PSF-2.0': 'PSF-2',
-            'Python Software Foundation License': 'PSF-2',
-            'LGPL-2.1': 'LGPL-2.1',
-            'LGPL-3.0': 'LGPL-3',
-            'ISC': 'ISC',
-            'MPL-2.0': 'MPL-2.0',
-            'CC0-1.0': 'CC0-1.0',
-            'Unlicense': 'Unlicense',
-        }
+        # Retained for backwards compatibility; the tables now live in
+        # portage_pip_fuse.gentoo_license.
+        self.license_map = dict(gentoo_license.PROSE_TO_GENTOO)
+        self.license_map.update(gentoo_license.SPDX_TO_GENTOO)
 
     def _get_gentoo_atom(self, pypi_name: str, gentoo_name: str) -> str:
         """
@@ -1278,73 +1256,9 @@ class EbuildDataExtractor:
         """
         if not spdx_expr:
             return None
-            
-        # SPDX to Gentoo license mapping
-        spdx_to_gentoo = {
-            'MIT': 'MIT',
-            'Apache-2.0': 'Apache-2.0',
-            'BSD-2-Clause': 'BSD-2',
-            'BSD-3-Clause': 'BSD',
-            'GPL-2.0': 'GPL-2',
-            'GPL-2.0-only': 'GPL-2',
-            'GPL-2.0-or-later': 'GPL-2+',
-            'GPL-2.0+': 'GPL-2+',
-            'GPL-3.0': 'GPL-3',
-            'GPL-3.0-only': 'GPL-3',
-            'GPL-3.0-or-later': 'GPL-3+',
-            'GPL-3.0+': 'GPL-3+',
-            'LGPL-2.1': 'LGPL-2.1',
-            'LGPL-2.1-only': 'LGPL-2.1',
-            'LGPL-2.1-or-later': 'LGPL-2.1+',
-            'LGPL-2.1+': 'LGPL-2.1+',
-            'LGPL-3.0': 'LGPL-3',
-            'LGPL-3.0-only': 'LGPL-3',
-            'LGPL-3.0-or-later': 'LGPL-3+',
-            'LGPL-3.0+': 'LGPL-3+',
-            'ISC': 'ISC',
-            'MPL-2.0': 'MPL-2.0',
-            'CC0-1.0': 'CC0-1.0',
-            'Unlicense': 'Unlicense',
-            'Python-2.0': 'PSF-2',
-            'PSF-2.0': 'PSF-2',
-        }
-        
-        # Handle OR expressions (e.g., "Apache-2.0 OR BSD-2-Clause")
-        if ' OR ' in spdx_expr:
-            parts = [part.strip() for part in spdx_expr.split(' OR ')]
-            gentoo_parts = []
-            for part in parts:
-                gentoo_license = spdx_to_gentoo.get(part)
-                if gentoo_license:
-                    gentoo_parts.append(gentoo_license)
-                else:
-                    # If we can't translate any part, fall back to None
-                    return None
-            if gentoo_parts:
-                return f"|| ( {' '.join(gentoo_parts)} )"
-        
-        # Handle AND expressions (e.g., "MIT AND Apache-2.0")
-        elif ' AND ' in spdx_expr:
-            parts = [part.strip() for part in spdx_expr.split(' AND ')]
-            gentoo_parts = []
-            for part in parts:
-                gentoo_license = spdx_to_gentoo.get(part)
-                if gentoo_license:
-                    gentoo_parts.append(gentoo_license)
-                else:
-                    # If we can't translate any part, fall back to None
-                    return None
-            if gentoo_parts:
-                return ' '.join(gentoo_parts)
-        
-        # Single license
-        else:
-            spdx_clean = spdx_expr.strip()
-            if spdx_clean in spdx_to_gentoo:
-                return spdx_to_gentoo[spdx_clean]
-        
-        return None
-    
+
+        return gentoo_license.translate_expression(spdx_expr)
+
     def translate_license(self, pypi_license: str, license_expression: str = '') -> str:
         """
         Translate PyPI license string to Gentoo license format.
@@ -1386,59 +1300,7 @@ class EbuildDataExtractor:
             >>> extractor.translate_license('some weird mit license')
             'MIT'
         """
-        # Try license_expression first (PEP 639 - new style)
-        if license_expression:
-            gentoo_license = self._translate_spdx_expression(license_expression)
-            if gentoo_license:
-                return gentoo_license
-        
-        # Fall back to traditional license field
-        if not pypi_license:
-            return 'all-rights-reserved'
-            
-        # Direct mapping
-        if pypi_license in self.license_map:
-            return self.license_map[pypi_license]
-        
-        # Case-insensitive partial matching for common cases
-        pypi_lower = pypi_license.lower()
-        
-        if 'mit' in pypi_lower:
-            return 'MIT'
-        elif 'apache' in pypi_lower and '2' in pypi_lower:
-            return 'Apache-2.0'
-        elif 'bsd' in pypi_lower:
-            if '2' in pypi_lower:
-                return 'BSD-2'
-            else:
-                return 'BSD'
-        elif 'gpl' in pypi_lower:
-            if '3' in pypi_lower:
-                return 'GPL-3+' if '+' in pypi_lower or 'later' in pypi_lower else 'GPL-3'
-            elif '2' in pypi_lower:
-                return 'GPL-2+' if '+' in pypi_lower or 'later' in pypi_lower else 'GPL-2'
-            else:
-                return 'GPL-3+'  # Default to GPL-3+ for unspecified GPL
-        elif 'lgpl' in pypi_lower:
-            if '2.1' in pypi_lower:
-                return 'LGPL-2.1'
-            elif '3' in pypi_lower:
-                return 'LGPL-3'
-            else:
-                return 'LGPL-2.1'  # Default to 2.1
-        elif 'python' in pypi_lower or 'psf' in pypi_lower:
-            return 'PSF-2'
-        elif 'isc' in pypi_lower:
-            return 'ISC'
-        elif 'mozilla' in pypi_lower or 'mpl' in pypi_lower:
-            return 'MPL-2.0'
-        elif 'unlicense' in pypi_lower:
-            return 'Unlicense'
-        elif 'cc0' in pypi_lower:
-            return 'CC0-1.0'
-        else:
-            # Unknown license - use all-rights-reserved per Gentoo policy
-            return 'all-rights-reserved'
+        return gentoo_license.translate(pypi_license, license_expression)
 
     @classmethod
     def _get_supported_python_versions(cls) -> List[str]:

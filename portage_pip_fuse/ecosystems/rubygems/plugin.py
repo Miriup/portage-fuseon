@@ -12,6 +12,7 @@ import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
+from portage_pip_fuse import gentoo_license
 from portage_pip_fuse import pms_version
 from portage_pip_fuse.plugin import (
     EcosystemPlugin,
@@ -942,32 +943,7 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
         - GPL-2.0 -> GPL-2
         - BSD-3-Clause -> BSD
         """
-        if not licenses:
-            return "unknown"
-
-        license_map = {
-            'MIT': 'MIT',
-            'Apache-2.0': 'Apache-2.0',
-            'Apache 2.0': 'Apache-2.0',
-            'GPL-2.0': 'GPL-2',
-            'GPL-3.0': 'GPL-3',
-            'BSD-3-Clause': 'BSD',
-            'BSD-2-Clause': 'BSD-2',
-            'Ruby': 'Ruby',
-            'ISC': 'ISC',
-            'LGPL-2.1': 'LGPL-2.1',
-            'LGPL-3.0': 'LGPL-3',
-            'MPL-2.0': 'MPL-2.0',
-        }
-
-        translated = []
-        for lic in licenses:
-            if lic in license_map:
-                translated.append(license_map[lic])
-            else:
-                translated.append(lic)
-
-        return ' '.join(translated)
+        return gentoo_license.translate_list(licenses)
 
     def _escape_string(self, s: str) -> str:
         """Escape string for use in ebuild."""
