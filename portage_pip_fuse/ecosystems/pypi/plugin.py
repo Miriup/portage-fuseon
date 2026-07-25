@@ -72,20 +72,51 @@ class PyPIMetadataProvider(MetadataProviderBase):
         return self._extractor
 
     def get_package_info(self, name: str) -> Optional[Dict[str, Any]]:
-        """Get complete package information from PyPI."""
-        return self.extractor.get_package_info(name)
+        """
+        Get complete package information from PyPI.
+
+        Returns the raw PyPI JSON document, which is the de-facto internal
+        metadata contract on the PyPI side: the SQLite backend converts its
+        rows into this shape too.
+        """
+        return self.extractor.get_package_json(name)
 
     def get_package_versions(self, name: str) -> List[str]:
-        """Get list of available versions for a package."""
-        return self.extractor.get_package_versions(name)
+        """
+        Get list of available versions for a package, newest first.
+
+        The hybrid backend answers this directly; the plain JSON extractor has
+        no such method, so the versions come from the package document.
+        """
+        getter = getattr(self.extractor, 'get_package_versions', None)
+        if getter is not None:
+            return getter(name)
+
+        data = self.extractor.get_package_json(name)
+        if not data:
+            return []
+        return list(data.get('releases', {}).keys())
 
     def get_version_info(self, name: str, version: str) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific version."""
-        return self.extractor.get_version_info(name, version)
+        return self.extractor.get_complete_package_info(name, version)
 
     def list_packages(self) -> Set[str]:
-        """List all available packages."""
-        return self.extractor.list_packages()
+        """
+        List known packages.
+
+        PyPI has no cheap full enumeration -- the simple index is a multi-
+        megabyte scrape -- so, as on the RubyGems side, this reports the
+        packages already in the local cache rather than every package on PyPI.
+        """
+        lister = getattr(self.extractor, '_list_cached_packages', None)
+        if lister is None:
+            # The hybrid extractor delegates to a JSON backend that has it.
+            backend = getattr(self.extractor, 'json_backend', None)
+            lister = getattr(backend, '_list_cached_packages', None)
+        if lister is None:
+            return set()
+        return set(lister())
 
     def get_package_json(self, name: str) -> Optional[Dict[str, Any]]:
         """Get raw PyPI JSON for a package."""
@@ -126,20 +157,54 @@ class PyPIEbuildGenerator(EbuildGeneratorBase):
         version: str,
         gentoo_name: str
     ) -> str:
-        """Generate ebuild content for a package version."""
-        return self.extractor.generate_ebuild(package_info, version, gentoo_name)
+        """
+        Generate ebuild content for a package version.
+
+        Not implemented on the PyPI side. Ebuild *formatting* still lives in
+        PortagePipFS._format_ebuild rather than in this generator, so there is
+        no method here to delegate to; prepare_ebuild_data() below exposes
+        everything the formatter consumes.
+
+        Raises:
+            NotImplementedError: always, until formatting moves out of the
+                filesystem layer
+        """
+        raise NotImplementedError(
+            'PyPI ebuild formatting lives in PortagePipFS._format_ebuild, not '
+            'in the plugin. Use prepare_ebuild_data() for the underlying data.'
+        )
+
+    def prepare_ebuild_data(
+        self,
+        package_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Build the data dictionary the ebuild formatter consumes.
+
+        Args:
+            package_info: Complete package information
+
+        Returns:
+            Mapping with LICENSE, PYTHON_COMPAT, RDEPEND, BDEPEND and the
+            source-selection flags
+        """
+        return self.extractor.prepare_ebuild_data(package_info)
 
     def get_inherit_eclasses(self, package_info: Dict[str, Any]) -> List[str]:
-        """Get list of eclasses to inherit."""
-        # Default Python eclasses
-        eclasses = ['distutils-r1']
+        """
+        Get list of eclasses to inherit.
 
-        # Check for PEP 517 backend
-        pep517_backend = self.extractor._detect_pep517_backend(package_info)
-        if pep517_backend:
-            eclasses.append('pypi')
+        Mirrors the three-way branch in PortagePipFS._format_ebuild: git
+        sources use git-r3, wheels build with python-r1, and sdists use the
+        pypi eclass.
+        """
+        data = self.extractor.prepare_ebuild_data(package_info)
 
-        return eclasses
+        if data.get('use_git'):
+            return ['distutils-r1', 'git-r3']
+        if data.get('use_wheel'):
+            return ['python-r1', 'pypi']
+        return ['distutils-r1', 'pypi']
 
     def get_compat_variable(self) -> str:
         """Get the compatibility variable name."""
@@ -147,8 +212,8 @@ class PyPIEbuildGenerator(EbuildGeneratorBase):
 
     def generate_compat_declaration(self, package_info: Dict[str, Any]) -> str:
         """Generate PYTHON_COMPAT declaration."""
-        python_compat = self.extractor._generate_python_compat(package_info)
-        return f"PYTHON_COMPAT=( {python_compat} )"
+        data = self.extractor.prepare_ebuild_data(package_info)
+        return f"PYTHON_COMPAT=( {data.get('PYTHON_COMPAT', '')} )"
 
     def generate_dependencies(
         self,
@@ -156,11 +221,24 @@ class PyPIEbuildGenerator(EbuildGeneratorBase):
         version: str,
         dep_type: str = 'runtime'
     ) -> str:
-        """Generate dependency declarations."""
+        """
+        Generate dependency declarations.
+
+        Args:
+            package_info: Complete package information
+            version: Package version
+            dep_type: One of 'runtime', 'build' or 'test'
+
+        Returns:
+            Dependency string; empty for 'test', which PyPI metadata does not
+            express separately
+        """
+        data = self.extractor.prepare_ebuild_data(package_info)
+
         if dep_type == 'runtime':
-            return self.extractor._generate_rdepend(package_info, version)
-        elif dep_type == 'build':
-            return self.extractor._generate_bdepend(package_info, version)
+            return data.get('RDEPEND', '')
+        if dep_type == 'build':
+            return data.get('BDEPEND', '')
         return ""
 
 

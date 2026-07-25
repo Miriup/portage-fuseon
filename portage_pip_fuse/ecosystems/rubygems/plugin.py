@@ -149,17 +149,15 @@ class RubyGemsMetadataProvider(MetadataProviderBase):
             cache_dir: Cache directory path
             cache_ttl: Cache time-to-live in seconds
         """
-        import json
-        import time
         from pathlib import Path
         from portage_pip_fuse.constants import find_cache_dir
+        from portage_pip_fuse.json_cache import JSONCache
 
         self.cache_ttl = cache_ttl
         self.cache_dir = Path(find_cache_dir(cache_dir)) / 'rubygems'
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # In-memory cache: cache_key -> (data, timestamp)
-        self._memory_cache: Dict[str, tuple] = {}
+        self._cache = JSONCache(self.cache_dir, ttl=cache_ttl)
         self._session = None
 
         logger.info(f"RubyGems metadata cache initialized at {self.cache_dir}")
@@ -181,60 +179,20 @@ class RubyGemsMetadataProvider(MetadataProviderBase):
 
     def _get_cache_key(self, name: str, version: Optional[str] = None) -> str:
         """Generate cache key."""
-        if version:
-            return f"{name.lower()}_{version}"
-        return name.lower()
+        return self._cache.make_key(name, version)
 
     def _get_cache_path(self, cache_key: str):
         """Get filesystem path for cache key."""
-        from pathlib import Path
-        subdir = cache_key[:2] if len(cache_key) >= 2 else '00'
-        cache_subdir = self.cache_dir / subdir
-        cache_subdir.mkdir(exist_ok=True)
-        return cache_subdir / f"{cache_key}.json"
+        return self._cache.path_for(cache_key)
 
     def _get_cached(self, cache_key: str) -> Optional[Dict]:
         """Get data from cache."""
-        import json
-        import time
-
-        # Check memory cache first
-        if cache_key in self._memory_cache:
-            data, timestamp = self._memory_cache[cache_key]
-            if time.time() - timestamp < self.cache_ttl:
-                return data
-            del self._memory_cache[cache_key]
-
-        # Check disk cache
-        cache_path = self._get_cache_path(cache_key)
-        if cache_path.exists():
-            try:
-                if time.time() - cache_path.stat().st_mtime < self.cache_ttl:
-                    with cache_path.open('r') as f:
-                        data = json.load(f)
-                    self._memory_cache[cache_key] = (data, time.time())
-                    return data
-                cache_path.unlink(missing_ok=True)
-            except (json.JSONDecodeError, OSError):
-                cache_path.unlink(missing_ok=True)
-
-        return None
+        # The key is already composed, so look it up verbatim.
+        return self._cache.get(cache_key)
 
     def _set_cached(self, cache_key: str, data: Dict):
         """Store data in cache."""
-        import json
-        import time
-
-        self._memory_cache[cache_key] = (data, time.time())
-
-        cache_path = self._get_cache_path(cache_key)
-        try:
-            temp_path = cache_path.with_suffix('.tmp')
-            with temp_path.open('w') as f:
-                json.dump(data, f)
-            temp_path.rename(cache_path)
-        except OSError as e:
-            logger.warning(f"Failed to cache {cache_key}: {e}")
+        self._cache.set(cache_key, data)
 
     def _fetch_api(self, endpoint: str) -> Optional[Dict]:
         """Fetch from RubyGems API."""
@@ -336,14 +294,7 @@ class RubyGemsMetadataProvider(MetadataProviderBase):
         Note: RubyGems has ~180k gems, so we don't attempt to list all.
         This returns packages we have cached.
         """
-        packages = set()
-        for subdir in self.cache_dir.iterdir():
-            if subdir.is_dir():
-                for cache_file in subdir.glob("*.json"):
-                    name = cache_file.stem
-                    if '_' not in name:  # Exclude version-specific caches
-                        packages.add(name)
-        return packages
+        return set(self._cache.list_cached())
 
     def list_all_packages(self) -> Set[str]:
         """
