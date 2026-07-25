@@ -401,6 +401,7 @@ class NpmEbuildGenerator(EbuildGeneratorBase):
         translator: Optional[name_translator.NpmNameTranslator] = None,
         version_filter_chain: Optional[Any] = None,
         include_optional: bool = False,
+        resolution_lock: Optional[Any] = None,
     ):
         """
         Args:
@@ -414,12 +415,16 @@ class NpmEbuildGenerator(EbuildGeneratorBase):
             include_optional: Include optionalDependencies in the pins. Off by
                 default: npm treats them as best-effort, and a hard portage
                 dependency on one turns an optional feature into a build failure
+            resolution_lock: A ResolutionLockStore. Without one, resolution is
+                recomputed on every generation, so a newly published dependency
+                silently changes an existing ebuild's RDEPEND
         """
         self.metadata_provider = metadata_provider
         self.category = category
         self.node_dep = node_dep
         self.translator = translator or name_translator.NpmNameTranslator()
         self.include_optional = include_optional
+        self.resolution_lock = resolution_lock
 
         if version_filter_chain is None and metadata_provider is not None:
             version_filter_chain = npm_filters.create_filter_chain()
@@ -603,14 +608,50 @@ class NpmEbuildGenerator(EbuildGeneratorBase):
         pins: List[Tuple[str, str]] = []
         unresolved: List[Tuple[str, str]] = []
 
+        lock_key = self._lock_key(manifest)
+
         for npm_name, spec in sorted(self.collect_requirements(manifest).items()):
+            # A locked pin wins outright, and without a network round trip.
+            if lock_key is not None and self.resolution_lock is not None:
+                locked = self.resolution_lock.get_pin(*lock_key, npm_name)
+                if locked is not None:
+                    pins.append((npm_name, locked))
+                    continue
+
             resolved = self.resolve_one(npm_name, spec)
             if resolved is None:
                 unresolved.append((npm_name, spec))
-            else:
-                pins.append((npm_name, resolved))
+                continue
+
+            if lock_key is not None and self.resolution_lock is not None:
+                resolved = self.resolution_lock.record(*lock_key, npm_name,
+                                                       resolved)
+            pins.append((npm_name, resolved))
 
         return pins, unresolved
+
+    def _lock_key(
+        self,
+        manifest: Dict[str, Any],
+    ) -> Optional[Tuple[str, str, str]]:
+        """
+        Build the (category, package, version) key a lock is stored under.
+
+        Returns None when the manifest does not identify a translatable package
+        version, in which case resolution proceeds unlocked rather than being
+        filed under a wrong key.
+        """
+        npm_name = manifest.get('name')
+        npm_version = manifest.get('version')
+        if not npm_name or not npm_version:
+            return None
+
+        gentoo_name = self.translator.npm_to_gentoo(npm_name)
+        pms_version = version_translator.translate_version(npm_version)
+        if gentoo_name is None or pms_version is None:
+            return None
+
+        return (self.category, gentoo_name, pms_version)
 
     def resolve_one(self, npm_name: str, spec: str) -> Optional[str]:
         """

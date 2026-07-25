@@ -118,6 +118,13 @@ def mount_command() -> int:
     parser.add_argument('--logfile',
                         help='Log to this file; needed when daemonised, which '
                              'has no usable stderr')
+    parser.add_argument('--patch-file',
+                        help='Where dependency-pin locks are stored '
+                             '(default: the shared patches.json)')
+    parser.add_argument('--no-locks', action='store_true',
+                        help='Resolve dependencies afresh rather than reusing '
+                             'locked pins. Ebuilds then change whenever a '
+                             'dependency publishes a new version.')
     parser.add_argument('--pid-file', help='Write the mount process ID here')
     parser.add_argument('--no-allow-other', action='store_true',
                         help='Do not let other users read the mount. Portage '
@@ -163,6 +170,8 @@ def mount_command() -> int:
         print('Enabled filters: %s' % ', '.join(sorted(args.filter)))
     if args.no_filter:
         print('Disabled filters: %s' % ', '.join(sorted(args.no_filter)))
+    print('Dependency pins: %s' % ('resolved afresh each time'
+                                   if args.no_locks else 'locked once resolved'))
     print()
     print('Add the overlay to portage with: %s install' % PROG)
 
@@ -183,6 +192,8 @@ def mount_command() -> int:
                 node_versions=node_versions,
                 registry=args.registry,
                 max_versions=args.max_versions,
+                patch_file=args.patch_file,
+                no_locks=args.no_locks,
                 allow_other=not args.no_allow_other,
             )
     except RuntimeError as exc:
@@ -750,14 +761,24 @@ def debug_command() -> int:
     )
     parser.add_argument('action',
                         choices=['versions', 'info', 'translate', 'filter',
-                                 'deps', 'node'],
+                                 'deps', 'node', 'locks', 'unlock'],
                         help='What to inspect')
     parser.add_argument('name', nargs='?', help='Package name')
     parser.add_argument('--version', help='Specific version')
     parser.add_argument('--cache-dir', help='Metadata cache directory')
+    parser.add_argument('--patch-file', help='Where pin locks are stored')
+    parser.add_argument('--mountpoint',
+                        help='Limit to one mount point; locks are namespaced by '
+                             'mount, and all are shown by default')
     parser.add_argument('--json', action='store_true', help='Emit JSON')
 
     args = parser.parse_args(_argv_without('debug'))
+
+    if args.action == 'locks':
+        return _debug_locks(args)
+
+    if args.action == 'unlock':
+        return _debug_unlock(args)
 
     if args.action == 'node':
         versions = node_targets.get_node_versions()
@@ -784,6 +805,114 @@ def debug_command() -> int:
         return _debug_deps(args, provider)
 
     return 1
+
+
+def _lock_path(args) -> str:
+    """Resolve the lock file a debug command should read."""
+    from portage_pip_fuse.constants import DEFAULT_PATCH_FILE
+    return args.patch_file or str(DEFAULT_PATCH_FILE)
+
+
+def _lock_stores(args):
+    """
+    Open one lock store per mount-point namespace present in the file.
+
+    Locks are namespaced by mount point, so inspecting only the default
+    namespace hides everything an overlay mounted at a custom path recorded.
+
+    Returns:
+        List of ``(mount_point_key, store)`` pairs
+    """
+    from .resolution_lock import ResolutionLockStore
+
+    path = _lock_path(args)
+    wanted = getattr(args, 'mountpoint', None)
+
+    if wanted:
+        return [(wanted, ResolutionLockStore(storage_path=path,
+                                             mount_point=wanted))]
+
+    keys = ResolutionLockStore.list_mount_points(path)
+    if not keys:
+        return [('_default', ResolutionLockStore(storage_path=path))]
+
+    stores = []
+    for key in keys:
+        # '_default' is the key used when no mount point was recorded, so it
+        # must be opened without one rather than as a literal path.
+        store = ResolutionLockStore(
+            storage_path=path,
+            mount_point=None if key == '_default' else key)
+        stores.append((key, store))
+    return stores
+
+
+def _debug_locks(args) -> int:
+    """Show the recorded dependency pins, across every mount point."""
+    gentoo = name_translator.npm_to_gentoo(args.name) if args.name else None
+
+    payload = []
+    for mount_key, store in _lock_stores(args):
+        for category, package, version, pins in store.list_all_locks():
+            if gentoo is not None and package != gentoo:
+                continue
+            payload.append({'mount_point': mount_key, 'category': category,
+                            'package': package, 'version': version,
+                            'pins': pins})
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if not payload:
+        print('No dependency pins recorded.')
+        print('Pins are recorded as ebuilds are generated, so mount the '
+              'overlay and read a package first.')
+        return 0
+
+    current = None
+    for entry in payload:
+        if entry['mount_point'] != current:
+            current = entry['mount_point']
+            print('mount: %s' % current)
+        print('  %s/%s-%s (%d pin(s))' % (entry['category'], entry['package'],
+                                          entry['version'], len(entry['pins'])))
+        for name in sorted(entry['pins']):
+            print('      %-38s %s' % (name, entry['pins'][name]))
+    return 0
+
+
+def _debug_unlock(args) -> int:
+    """Clear recorded pins so they resolve afresh."""
+    gentoo = None
+    if args.name:
+        gentoo = name_translator.npm_to_gentoo(args.name)
+        if gentoo is None:
+            print('Error: %r is not a usable package name' % args.name,
+                  file=sys.stderr)
+            return 1
+
+    removed = 0
+    for _mount_key, store in _lock_stores(args):
+        if gentoo is None:
+            removed += store.clear()
+        elif args.version:
+            pms = version_translator.translate_version(args.version) or args.version
+            removed += 1 if store.remove('dev-nodejs', gentoo, pms) else 0
+        else:
+            removed += store.remove_package('dev-nodejs', gentoo)
+
+        if store.is_dirty and not store.save():
+            print('Error: could not save the lock file', file=sys.stderr)
+            return 1
+
+    if not removed:
+        print('Nothing to unlock.')
+        return 0
+
+    print('Unlocked %d package version(s); they will resolve afresh on the '
+          'next generation.' % removed)
+    return 0
 
 
 def _debug_translate(args) -> int:

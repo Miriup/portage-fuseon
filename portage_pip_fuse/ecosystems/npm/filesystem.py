@@ -34,8 +34,10 @@ from typing import Any, Dict, List, Optional
 
 from fuse import FUSE, FuseOSError, Operations
 
+from portage_pip_fuse.constants import DEFAULT_PATCH_FILE
 from portage_pip_fuse.ecosystems.npm import filters as npm_filters
 from portage_pip_fuse.ecosystems.npm import name_translator, version_translator
+from portage_pip_fuse.ecosystems.npm.resolution_lock import ResolutionLockStore
 from portage_pip_fuse.ecosystems.npm.plugin import (
     NpmEbuildGenerator,
     NpmMetadataProvider,
@@ -95,6 +97,8 @@ class PortageNpmFS(Operations):
         node_versions: Optional[List[str]] = None,
         registry: Optional[str] = None,
         max_versions: int = 0,
+        patch_file: Optional[str] = None,
+        no_locks: bool = False,
     ):
         """
         Args:
@@ -108,6 +112,11 @@ class PortageNpmFS(Operations):
                 0 means no cap. A package with 3000 published versions produces
                 3000 ebuilds otherwise, which makes ``emerge --sync``-style tree
                 walks slow for no benefit.
+            patch_file: Where dependency-pin locks are stored; defaults to the
+                shared patches.json
+            no_locks: Resolve afresh every time. Ebuilds then change whenever a
+                dependency publishes a new version, which is occasionally what
+                you want and usually not.
         """
         self.plugin = NpmPlugin()
         self.category = self.plugin.default_category
@@ -125,11 +134,20 @@ class PortageNpmFS(Operations):
             disabled_filters=config.get('disabled_filters'),
             node_versions=node_versions,
         )
+        if no_locks:
+            self.resolution_lock = None
+        else:
+            self.resolution_lock = ResolutionLockStore(
+                storage_path=patch_file or str(DEFAULT_PATCH_FILE),
+                mount_point=mount_point,
+            )
+
         self.ebuild_generator = NpmEbuildGenerator(
             metadata_provider=self.metadata_provider,
             category=self.category,
             translator=self.name_translator,
             version_filter_chain=self.version_filter_chain,
+            resolution_lock=self.resolution_lock,
         )
 
         self._eclass_path = _find_eclass()
@@ -576,6 +594,20 @@ class PortageNpmFS(Operations):
         """Release a file handle."""
         return 0
 
+    def destroy(self, path):
+        """
+        Persist newly recorded dependency pins on unmount.
+
+        Locks are recorded lazily as ebuilds are generated, so without this the
+        first mount's decisions are lost and the next mount resolves afresh --
+        defeating the point of locking.
+        """
+        if self.resolution_lock is not None and self.resolution_lock.is_dirty:
+            if self.resolution_lock.save():
+                logger.info('Saved dependency pin locks')
+            else:
+                logger.error('Failed to save dependency pin locks')
+
     # -- read-only rejections -------------------------------------------------
 
     def _readonly(self, *args, **kwargs):
@@ -606,6 +638,8 @@ def mount_npm_filesystem(
     node_versions: Optional[List[str]] = None,
     registry: Optional[str] = None,
     max_versions: int = 0,
+    patch_file: Optional[str] = None,
+    no_locks: bool = False,
     allow_other: bool = True,
 ):
     """
@@ -621,6 +655,8 @@ def mount_npm_filesystem(
         node_versions: Override the detected Node versions
         registry: Alternative registry base URL
         max_versions: Cap ebuilds per package, newest first; 0 for no cap
+        patch_file: Where dependency-pin locks are stored
+        no_locks: Resolve dependencies afresh instead of reusing locked pins
         allow_other: Let other users, notably portage, read the mount
     """
     if not logging.getLogger().handlers:
@@ -636,6 +672,8 @@ def mount_npm_filesystem(
         node_versions=node_versions,
         registry=registry,
         max_versions=max_versions,
+        patch_file=patch_file,
+        no_locks=no_locks,
     )
 
     # Timeouts are zeroed so a package appearing in the cache becomes visible
