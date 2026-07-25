@@ -35,6 +35,43 @@ logger = logging.getLogger(__name__)
 __all__ = ['JSONCache']
 
 
+def _encode_filename(key: str) -> str:
+    """
+    Encode a cache key as a single filename component, reversibly.
+
+    Only ``/`` needs escaping -- it would create a directory level -- but ``%``
+    has to be escaped first so the transform can be undone. Replacing ``/`` with
+    ``_``, as an earlier version did, is lossy: an npm scoped name comes back as
+    ``@vue_cli-service``, indistinguishable from a package that really contains
+    an underscore, so listings could not recover the original name.
+
+    Examples:
+        >>> _encode_filename('chalk')
+        'chalk'
+        >>> _encode_filename('@vue/cli-service')
+        '@vue%2Fcli-service'
+        >>> _encode_filename('odd%name')
+        'odd%25name'
+    """
+    return key.replace('%', '%25').replace('/', '%2F')
+
+
+def _decode_filename(name: str) -> str:
+    """
+    Reverse :func:`_encode_filename`.
+
+    Examples:
+        >>> _decode_filename('@vue%2Fcli-service')
+        '@vue/cli-service'
+        >>> _decode_filename('odd%25name')
+        'odd%name'
+        >>> keys = ['chalk', '@vue/cli-service', 'odd%name', '@a_b/c']
+        >>> [_decode_filename(_encode_filename(k)) for k in keys] == keys
+        True
+    """
+    return name.replace('%2F', '/').replace('%25', '%')
+
+
 class JSONCache:
     """
     A TTL-bounded, two-level JSON cache.
@@ -132,17 +169,18 @@ class JSONCache:
         Returns:
             Path to the JSON file backing this key
         """
-        shard = key[:self.shard_width] if len(key) >= self.shard_width else '0' * self.shard_width
-        # Keys come from package names, which may contain a path separator in
-        # scoped-name ecosystems; flatten so the shard stays one level deep.
-        shard = shard.replace('/', '_').replace('.', '_')
+        encoded = _encode_filename(key)
+        shard = encoded[:self.shard_width] if len(encoded) >= self.shard_width \
+            else '0' * self.shard_width
+        # The shard is a directory name, so it must not contain a separator or a
+        # dot that would read as a path component.
+        shard = shard.replace('%', '_').replace('.', '_')
         shard_dir = self.cache_dir / shard
         try:
             shard_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
-        safe_key = key.replace('/', '_')
-        return shard_dir / f"{safe_key}.json"
+        return shard_dir / f"{encoded}.json"
 
     def get(self, name: str, version: Optional[str] = None) -> Optional[Any]:
         """
@@ -236,12 +274,19 @@ class JSONCache:
         """Drop the in-memory tier, leaving the on-disk tier intact."""
         self._memory.clear()
 
-    def list_cached(self) -> List[str]:
+    def list_cached(self, exclude_versioned: bool = True) -> List[str]:
         """
         List the package names present in the on-disk tier.
 
-        Version-specific entries are excluded, so this reports packages rather
-        than individual releases.
+        Args:
+            exclude_versioned: Skip entries whose name contains ``_``, on the
+                assumption they are ``name_version`` keys. Correct for a cache
+                that mixes package and release documents in one directory, which
+                is how the RubyGems provider uses it. Pass False when the caller
+                keeps release documents elsewhere *and* package names may
+                legitimately contain an underscore: an npm scoped name has its
+                ``/`` sanitised to ``_``, so ``@vue/cli-service`` would otherwise
+                be mistaken for a versioned entry and hidden.
 
         Returns:
             Sorted list of package names
@@ -254,10 +299,10 @@ class JSONCache:
             if not shard.is_dir():
                 continue
             for entry in shard.glob('*.json'):
-                stem = entry.stem
-                if '_' in stem:
+                name = _decode_filename(entry.stem)
+                if exclude_versioned and '_' in name:
                     # A version-keyed entry, not a package document.
                     continue
-                names.add(stem)
+                names.add(name)
 
         return sorted(names)

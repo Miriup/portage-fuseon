@@ -212,7 +212,9 @@ class NpmMetadataProvider(MetadataProviderBase):
         millions of documents -- so this reports what is already cached, as the
         RubyGems and PyPI providers do.
         """
-        return set(self._packuments.list_cached())
+        # Release documents live in a separate cache directory, so nothing here
+        # is version-keyed; and a scoped name's sanitised '/' looks like one.
+        return set(self._packuments.list_cached(exclude_versioned=False))
 
     # -- npm-specific ---------------------------------------------------------
 
