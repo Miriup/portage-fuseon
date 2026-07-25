@@ -46,6 +46,8 @@ try:
 except ImportError:
     HAS_PACKAGING = False
 
+from portage_pip_fuse import pms_version
+from portage_pip_fuse import pypi_version as pypi_version_mod
 from portage_pip_fuse.constants import find_cache_dir, HTTP_TIMEOUT
 
 logger = logging.getLogger(__name__)
@@ -1763,7 +1765,7 @@ class EbuildDataExtractor:
         # Simple atom - just append USEDEP
         return f"{dep}{usedep}"
 
-    def _translate_pypi_version(self, pypi_version: str) -> str:
+    def _translate_pypi_version(self, pypi_version: str) -> Optional[str]:
         """
         Translate PyPI version string to Gentoo format.
 
@@ -1778,7 +1780,10 @@ class EbuildDataExtractor:
             pypi_version: Version string in PyPI/PEP 440 format
 
         Returns:
-            Version string in Gentoo format
+            Version string in Gentoo format, or None when the version cannot be
+            represented in PMS form. This previously returned the unvalidated
+            rewrite, so versions such as '1.0+local.build' and '1!2.0' reached
+            dependency atoms in a form portage cannot parse.
 
         Examples:
             >>> extractor = EbuildDataExtractor()
@@ -1794,34 +1799,10 @@ class EbuildDataExtractor:
             '1.0_p1'
             >>> extractor._translate_pypi_version('1.2.3')
             '1.2.3'
+            >>> extractor._translate_pypi_version('1.0+local.build') is None
+            True
         """
-        import re
-        version = pypi_version
-
-        # Handle pre-release markers (must check longer patterns first)
-        # alpha/a followed by a number
-        # Use negative lookbehind to avoid matching 'a' in already-translated '_alpha'
-        version = re.sub(r'\.?alpha(\d+)', r'_alpha\1', version)
-        version = re.sub(r'(?<![a-z])\.?a(\d+)', r'_alpha\1', version)
-
-        # beta/b followed by a number
-        # Use negative lookbehind to avoid matching 'b' in already-translated '_beta'
-        version = re.sub(r'\.?beta(\d+)', r'_beta\1', version)
-        version = re.sub(r'(?<![a-z])\.?b(\d+)', r'_beta\1', version)
-
-        # rc/c followed by a number (release candidate)
-        # Must check 'rc' first before 'c' to avoid partial match
-        version = re.sub(r'\.?rc(\d+)', r'_rc\1', version)
-        # Only match standalone 'c' not preceded by 'r' (use negative lookbehind)
-        version = re.sub(r'(?<!r)\.?c(\d+)', r'_rc\1', version)
-
-        # post release
-        version = re.sub(r'\.post(\d+)', r'_p\1', version)
-
-        # dev release
-        version = re.sub(r'\.dev(\d+)', r'_pre\1', version)
-
-        return version
+        return pypi_version_mod.translate_pep440(pypi_version)
 
     def _normalize_version_shortest(self, version: str) -> str:
         """
@@ -1836,12 +1817,7 @@ class EbuildDataExtractor:
             >>> extractor._normalize_version_shortest('1.33')
             '1.33'
         """
-        # Don't normalize versions with suffixes
-        if '_' in version:
-            return version
-        while version.endswith('.0') and version.count('.') > 1:
-            version = version[:-2]
-        return version
+        return pms_version.normalize_shortest(version)
 
     def _normalize_version_longest(self, version: str) -> str:
         """
@@ -1854,12 +1830,7 @@ class EbuildDataExtractor:
             >>> extractor._normalize_version_longest('1.33.0')
             '1.33.0'
         """
-        # Don't normalize versions with suffixes
-        if '_' in version:
-            return version
-        if not version.endswith('.0') or version.count('.') < 2:
-            return version + '.0'
-        return version
+        return pms_version.normalize_longest(version)
 
     def _get_pep440_equivalent_version(self, version: str) -> Optional[str]:
         """
@@ -1884,16 +1855,7 @@ class EbuildDataExtractor:
             '2.0'
             >>> extractor._get_pep440_equivalent_version('1.0_alpha1')
         """
-        # Don't apply to versions with suffixes (alpha, beta, rc, p, pre)
-        if '_' in version:
-            return None
-
-        if version.endswith('.0') and version.count('.') > 1:
-            # Has trailing .0 - return without it (1.33.0 -> 1.33)
-            return version[:-2]
-        else:
-            # No trailing .0 - return with it (1.33 -> 1.33.0)
-            return version + '.0'
+        return pms_version.equivalent_form(version)
 
     def _format_gentoo_dependency(self, gentoo_atom: str, specifiers) -> str:
         """
@@ -1943,7 +1905,24 @@ class EbuildDataExtractor:
         dep_parts = []
         for spec in specifiers:
             operator = spec.operator
-            version = self._translate_pypi_version(spec.version)
+
+            # A trailing '.*' is a PEP 440 wildcard, not part of the version, so
+            # strip it before translating and re-apply it afterwards. Feeding it
+            # to the translator would fail PMS validation.
+            raw_version = spec.version
+            is_wildcard = raw_version.endswith('.*')
+            if is_wildcard:
+                raw_version = raw_version[:-2]
+
+            version = self._translate_pypi_version(raw_version)
+            if version is None:
+                logger.debug(
+                    f"Skipping specifier {operator}{spec.version} for "
+                    f"{gentoo_atom}: no valid Gentoo version equivalent"
+                )
+                continue
+            if is_wildcard:
+                version = version + '.*'
 
             # Translate operators to Gentoo format
             if operator == '==':
@@ -2003,6 +1982,11 @@ class EbuildDataExtractor:
                 else:
                     # Single segment - not valid per PEP 440, but handle gracefully
                     dep_parts.append(f">={gentoo_atom}-{version}")
+
+        # Every specifier was untranslatable: fall back to an unversioned atom
+        # rather than emitting an empty string.
+        if not dep_parts:
+            return gentoo_atom
 
         # For multiple specifiers, we need to use Gentoo's syntax
         if len(dep_parts) == 1:

@@ -12,6 +12,7 @@ import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
+from portage_pip_fuse import pms_version
 from portage_pip_fuse.plugin import (
     EcosystemPlugin,
     EbuildGeneratorBase,
@@ -876,6 +877,12 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
 
         op, version = match.groups()
         gentoo_version = self._translate_gem_version(version)
+        if gentoo_version is None:
+            # Untranslatable version: an unversioned atom is the only honest
+            # rendering, and matches how an unparseable constraint is handled.
+            logger.debug(f"Cannot translate gem version {version!r} for "
+                         f"{gentoo_name}; emitting unversioned atom")
+            return f"dev-ruby/{gentoo_name}"
 
         if op == '~>':
             # Pessimistic constraint: ~> 2.1 means >= 2.1, < 3.0
@@ -903,7 +910,7 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
 
         return f"dev-ruby/{gentoo_name}"
 
-    def _translate_gem_version(self, gem_version: str) -> str:
+    def _translate_gem_version(self, gem_version: str) -> Optional[str]:
         """
         Translate gem version to Gentoo format.
 
@@ -913,60 +920,17 @@ class RubyGemsEbuildGenerator(EbuildGeneratorBase):
         - 1.0.0.rc1 -> 1.0.0_rc1
         - 1.0.0.alpha -> 1.0.0_alpha
         - 1.0.0.alpha.pre.4 -> 1.0.0_alpha_pre_p4 (standalone numbers become _p)
+
+        Args:
+            gem_version: RubyGems version string
+
+        Returns:
+            Gentoo version string, or None if the version has a suffix that
+            cannot be represented in PMS form. This previously appended the
+            unrecognised component verbatim, which produced atoms portage
+            cannot parse; callers now fall back to an unversioned atom.
         """
-        import re
-
-        # Standard Gentoo suffix names
-        standard_suffixes = {'alpha', 'beta', 'pre', 'rc'}
-
-        # Ruby shorthand -> Gentoo suffix (e.g., 5.a -> 5_alpha)
-        shorthand_map = {'a': 'alpha', 'b': 'beta'}
-
-        # Split into base version and suffix
-        match = re.match(r'^(\d+(?:\.\d+)*)(.*)$', gem_version)
-        if not match:
-            return gem_version
-
-        base, suffix = match.groups()
-
-        if not suffix:
-            return base
-
-        # Parse suffix components
-        suffix = suffix.lstrip('.')
-        if not suffix:
-            return base
-
-        components = suffix.split('.')
-
-        # Build the Gentoo suffix
-        gentoo_suffix = ''
-        for comp in components:
-            comp_lower = comp.lower()
-
-            # Check for Ruby shorthand (a, b, a1, b2)
-            if comp_lower in shorthand_map:
-                gentoo_suffix += f'_{shorthand_map[comp_lower]}'
-            elif comp_lower in standard_suffixes:
-                gentoo_suffix += f'_{comp_lower}'
-            elif comp.isdigit():
-                # Standalone number - treat as patchlevel
-                gentoo_suffix += f'_p{comp}'
-            else:
-                # Check for shorthand with number (a1 -> alpha1, b2 -> beta2)
-                m = re.match(r'^([ab])(\d+)$', comp_lower)
-                if m:
-                    gentoo_suffix += f'_{shorthand_map[m.group(1)]}{m.group(2)}'
-                else:
-                    # Check for combined suffix like 'alpha1', 'beta2'
-                    m = re.match(r'^([a-z]+)(\d+)$', comp_lower)
-                    if m and m.group(1) in standard_suffixes:
-                        gentoo_suffix += f'_{m.group(1)}{m.group(2)}'
-                    else:
-                        # Non-standard suffix - keep as-is (may produce invalid version)
-                        gentoo_suffix += f'.{comp}'
-
-        return base + gentoo_suffix
+        return pms_version.translate_dotted(gem_version)
 
     def _translate_license(self, licenses: List[str]) -> str:
         """

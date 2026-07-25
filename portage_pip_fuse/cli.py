@@ -22,9 +22,13 @@ from typing import List, Tuple, Optional, Set, Dict, Any
 from portage_pip_fuse.filesystem import mount_filesystem, PortagePipFS
 from portage_pip_fuse.package_filter import FilterRegistry
 from portage_pip_fuse.sqlite_metadata import SQLiteMetadataBackend
+from portage_pip_fuse import pypi_version as pypi_version_mod
 from portage_pip_fuse.constants import REPO_NAME, REPO_LOCATION, find_cache_dir
 from portage_pip_fuse.prefetcher import create_prefetched_translator
 from portage_pip_fuse.pip_metadata import EbuildDataExtractor
+
+logger = logging.getLogger(__name__)
+
 
 # Lazy-initialized translator with Gentoo repository mappings
 _prefetched_translator = None
@@ -120,31 +124,25 @@ def check_fuse_availability():
         sys.exit(1)
 
 
-def _translate_pypi_version(pypi_version: str) -> str:
+def _translate_pypi_version(pypi_version: str) -> Optional[str]:
     """
-    Translate PyPI version string to Gentoo format.
+    Translate PyPI version to Gentoo format.
 
-    Converts PEP 440 pre-release and post-release markers:
-    - a/alpha -> _alpha (e.g., 2.0a0 -> 2.0_alpha0)
-    - b/beta -> _beta (e.g., 1.0b1 -> 1.0_beta1)
-    - rc/c -> _rc (e.g., 3.0rc1 -> 3.0_rc1)
-    - .post -> _p (e.g., 1.0.post1 -> 1.0_p1)
-    - .dev -> _pre (e.g., 1.0.dev1 -> 1.0_pre1)
+    Args:
+        pypi_version: Version string in PyPI/PEP 440 format
+
+    Returns:
+        PMS version string, or None if the version cannot be represented
+
+    Examples:
+        >>> _translate_pypi_version('1.2.3')
+        '1.2.3'
+        >>> _translate_pypi_version('2.0a1')
+        '2.0_alpha1'
+        >>> _translate_pypi_version('1.0+local') is None
+        True
     """
-    version = pypi_version
-
-    # Handle pre-release markers (must check longer patterns first)
-    # Use negative lookbehind to avoid matching 'a'/'b' in already-translated '_alpha'/'_beta'
-    version = re.sub(r'\.?alpha(\d+)', r'_alpha\1', version)
-    version = re.sub(r'(?<![a-z])\.?a(\d+)', r'_alpha\1', version)
-    version = re.sub(r'\.?beta(\d+)', r'_beta\1', version)
-    version = re.sub(r'(?<![a-z])\.?b(\d+)', r'_beta\1', version)
-    version = re.sub(r'\.?rc(\d+)', r'_rc\1', version)
-    version = re.sub(r'(?<!r)\.?c(\d+)', r'_rc\1', version)
-    version = re.sub(r'\.post(\d+)', r'_p\1', version)
-    version = re.sub(r'\.dev(\d+)', r'_pre\1', version)
-
-    return version
+    return pypi_version_mod.translate_pep440(pypi_version)
 
 
 def _format_gentoo_atom(package_name: str, specifier=None) -> str:
@@ -167,7 +165,23 @@ def _format_gentoo_atom(package_name: str, specifier=None) -> str:
     dep_parts = []
     for spec in specifier:
         operator = spec.operator
-        version = _translate_pypi_version(spec.version)
+
+        # A trailing '.*' is a PEP 440 wildcard, not part of the version; strip
+        # it before translating so it does not fail PMS validation.
+        raw_version = spec.version
+        is_wildcard = raw_version.endswith('.*')
+        if is_wildcard:
+            raw_version = raw_version[:-2]
+
+        version = _translate_pypi_version(raw_version)
+        if version is None:
+            logger.debug(
+                f"Skipping specifier {operator}{spec.version} for {gentoo_name}: "
+                f"no valid Gentoo version equivalent"
+            )
+            continue
+        if is_wildcard:
+            version = version + '.*'
 
         if operator == '==':
             # Handle wildcard versions: PyPI ==23.* -> Gentoo =pkg-23*
@@ -830,6 +844,11 @@ Then runs: emerge @{project}-dependencies
 
             # Translate version to Gentoo format
             gentoo_version = _translate_pypi_version(project_version)
+            if gentoo_version is None:
+                print(f"Error: project version {project_version!r} has no valid "
+                      f"Gentoo equivalent; cannot name the virtual ebuild",
+                      file=sys.stderr)
+                return 1
 
             # Get PYTHON_COMPAT
             supported_versions = EbuildDataExtractor._get_supported_python_versions()

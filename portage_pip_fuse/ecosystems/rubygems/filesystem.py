@@ -23,6 +23,7 @@ from typing import Optional, Dict, List, Set, Tuple, Any
 
 from fuse import FUSE, FuseOSError, Operations
 
+from portage_pip_fuse import pms_version
 from portage_pip_fuse.constants import DEFAULT_PATCH_FILE
 from portage_pip_fuse.slot_patch import SlotPatchStore, is_valid_slot
 from portage_pip_fuse.dependency_patch import DependencyPatchStore
@@ -628,66 +629,7 @@ cache-formats = md5-dict
             >>> fs._translate_gem_version('2.0.0.alpha.pre4')
             '2.0.0_alpha_pre4'
         """
-        # Standard Gentoo suffix names (excluding 'p' as it's only for patchlevel)
-        standard_suffixes = {'alpha', 'beta', 'pre', 'rc'}
-
-        # Ruby shorthand -> Gentoo suffix (e.g., 5.a -> 5_alpha)
-        shorthand_map = {'a': 'alpha', 'b': 'beta'}
-
-        # Split into base version (numbers.numbers...) and suffix
-        match = re.match(r'^(\d+(?:\.\d+)*)(.*)$', gem_version)
-        if not match:
-            return None
-
-        base, suffix = match.groups()
-
-        if not suffix:
-            return base  # Pure numeric version
-
-        # Parse suffix components
-        suffix = suffix.lstrip('.')
-        if not suffix:
-            return base
-
-        components = suffix.split('.')
-
-        # Build the Gentoo suffix
-        gentoo_suffix = ''
-        i = 0
-        while i < len(components):
-            comp = components[i].lower()
-
-            # Check for Ruby shorthand (a, b)
-            if comp in shorthand_map:
-                gentoo_suffix += f'_{shorthand_map[comp]}'
-                i += 1
-            elif comp in standard_suffixes:
-                gentoo_suffix += f'_{comp}'
-                i += 1
-            elif comp.isdigit():
-                # Standalone number - treat as patchlevel (_p)
-                gentoo_suffix += f'_p{comp}'
-                i += 1
-            elif re.match(r'^([ab])(\d+)$', comp):
-                # Shorthand with number (a1 -> alpha1, b2 -> beta2)
-                m = re.match(r'^([ab])(\d+)$', comp)
-                gentoo_suffix += f'_{shorthand_map[m.group(1)]}{m.group(2)}'
-                i += 1
-            elif re.match(r'^([a-z]+)(\d+)$', comp):
-                # Combined suffix like 'alpha1', 'beta2', 'pre4'
-                m = re.match(r'^([a-z]+)(\d+)$', comp)
-                name, num = m.groups()
-                if name in standard_suffixes:
-                    gentoo_suffix += f'_{name}{num}'
-                    i += 1
-                else:
-                    # Non-standard suffix
-                    return None
-            else:
-                # Non-standard suffix
-                return None
-
-        return base + gentoo_suffix
+        return pms_version.translate_dotted(gem_version)
 
     def _gentoo_to_gem_version(self, gentoo_version: str) -> str:
         """
@@ -714,19 +656,7 @@ cache-formats = md5-dict
             >>> fs._gentoo_to_gem_version('2.0.0_alpha_pre4')
             '2.0.0.alpha.pre4'
         """
-        version = gentoo_version
-
-        # Reverse the patchlevel suffix first (e.g., _p1 -> .1)
-        version = re.sub(r'_p(\d+)', r'.\1', version)
-
-        # Reverse the pre-release marker translation
-        # Handle suffixes with and without numbers
-        version = re.sub(r'_alpha(\d*)', r'.alpha\1', version)
-        version = re.sub(r'_beta(\d*)', r'.beta\1', version)
-        version = re.sub(r'_pre(\d*)', r'.pre\1', version)
-        version = re.sub(r'_rc(\d*)', r'.rc\1', version)
-
-        return version
+        return pms_version.untranslate_dotted(gentoo_version)
 
     def _get_package_info(self, gem_name: str) -> Optional[Dict[str, Any]]:
         """Get package metadata from RubyGems."""

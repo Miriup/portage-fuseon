@@ -12,6 +12,8 @@ Licensed under GPL-2.0
 
 import doctest
 import itertools
+import json
+import pathlib
 import re
 
 import pytest
@@ -197,32 +199,39 @@ class TestNormalization:
         assert pv.equivalent_form('1.0_alpha1') is None
 
 
-class TestParityWithRubyGemsImplementations:
+class TestGoldenCorpus:
     """
-    Guard the consolidation: the shared module must reproduce the RubyGems
-    tokenizer it replaced, so ebuild versions do not shift under the refactor.
+    Regression guard against the pre-consolidation RubyGems implementations.
+
+    ``tests/data/gem_version_golden.json`` was captured from the RubyGems
+    tokenizer *before* it was replaced, so these assertions stay meaningful
+    after the delegation — unlike comparing the two live implementations, which
+    would now be comparing the shared module against itself.
     """
 
-    def test_translate_matches_filesystem_tokenizer(self):
-        pytest.importorskip('fuse')
-        from portage_pip_fuse.ecosystems.rubygems.filesystem import PortageGemFS
+    @staticmethod
+    def _golden():
+        path = pathlib.Path(__file__).parent / 'data' / 'gem_version_golden.json'
+        with path.open() as handle:
+            return json.load(handle)
 
-        fs = PortageGemFS.__new__(PortageGemFS)
-        for version in CORPUS:
-            assert fs._translate_gem_version(version) == pv.translate_dotted(version), \
-                'divergence on %r' % version
+    def test_translate_matches_golden(self):
+        golden = self._golden()['translate']
+        for version, expected in golden.items():
+            assert pv.translate_dotted(version) == expected, \
+                'drift on %r: golden %r' % (version, expected)
 
-    def test_untranslate_matches_filesystem_inverse(self):
-        pytest.importorskip('fuse')
-        from portage_pip_fuse.ecosystems.rubygems.filesystem import PortageGemFS
+    def test_untranslate_matches_golden(self):
+        golden = self._golden()['untranslate']
+        for gentoo_version, expected in golden.items():
+            assert pv.untranslate_dotted(gentoo_version) == expected, \
+                'drift on %r: golden %r' % (gentoo_version, expected)
 
-        fs = PortageGemFS.__new__(PortageGemFS)
-        for version in CORPUS:
-            translated = pv.translate_dotted(version)
-            if translated is None:
-                continue
-            assert fs._gentoo_to_gem_version(translated) == \
-                pv.untranslate_dotted(translated), 'divergence on %r' % translated
+    def test_golden_covers_the_corpus(self):
+        """The fixture must not silently fall out of sync with the corpus."""
+        golden = self._golden()['translate']
+        missing = [v for v in CORPUS if v not in golden]
+        assert not missing, 'corpus entries absent from golden data: %r' % missing
 
 
 def test_doctests():

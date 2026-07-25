@@ -23,6 +23,8 @@ from typing import Optional, Dict, List, Set, Tuple
 
 from fuse import FUSE, FuseOSError, Operations
 
+from . import pms_version
+from . import pypi_version as pypi_version_mod
 from .constants import REPO_NAME, DEFAULT_PATCH_FILE, get_mount_point_key
 from .dependency_patch import DependencyPatchStore
 from .ebuild_append_patch import EbuildAppendPatchStore, is_valid_phase_name
@@ -1058,62 +1060,33 @@ cache-formats = md5-dict
             return True
     
     def _translate_version(self, pypi_version: str) -> Optional[str]:
-        """Translate PyPI version to Gentoo format."""
-        import re
+        """
+        Translate PyPI version to Gentoo format.
 
-        if PypiVersion is None:
-            # Fallback using regex patterns (same as pip_metadata.py)
-            version = pypi_version
+        Args:
+            pypi_version: Version string in PyPI/PEP 440 format
 
-            # Handle pre-release markers (must check longer patterns first)
-            # alpha/a followed by a number
-            # Use negative lookbehind to avoid matching 'a' in already-translated '_alpha'
-            version = re.sub(r'\.?alpha(\d+)', r'_alpha\1', version)
-            version = re.sub(r'(?<![a-z])\.?a(\d+)', r'_alpha\1', version)
-
-            # beta/b followed by a number
-            # Use negative lookbehind to avoid matching 'b' in already-translated '_beta'
-            version = re.sub(r'\.?beta(\d+)', r'_beta\1', version)
-            version = re.sub(r'(?<![a-z])\.?b(\d+)', r'_beta\1', version)
-
-            # rc/c followed by a number (release candidate)
-            # Must check 'rc' first before 'c' to avoid partial match
-            version = re.sub(r'\.?rc(\d+)', r'_rc\1', version)
-            # Only match standalone 'c' not preceded by 'r' (use negative lookbehind)
-            version = re.sub(r'(?<!r)\.?c(\d+)', r'_rc\1', version)
-
-            # post release
-            version = re.sub(r'\.post(\d+)', r'_p\1', version)
-
-            # dev release
-            version = re.sub(r'\.dev(\d+)', r'_pre\1', version)
-        else:
+        Returns:
+            PMS version string, or None if the version cannot be represented
+        """
+        if PypiVersion is not None:
             try:
                 parsed = PypiVersion.parse_version(pypi_version)
                 version = str(parsed) if parsed else None
             except Exception:
                 version = None
-
-        # Validate the translated version against Gentoo's format
-        # Valid: digits, dots, and suffixes (_alpha, _beta, _pre, _rc, _p) with optional numbers
-        # Invalid: hyphens (except -r for revision), bare letters, special chars
-        if version:
-            # Gentoo version regex based on PMS specification
-            # Format: numeric(.numeric)* with optional suffixes and revision
-            gentoo_version_re = re.compile(
-                r'^'
-                r'\d+(\.\d+)*'  # Base version: 1.2.3
-                r'([a-z])?'  # Optional single letter suffix (rare but valid)
-                r'(_alpha\d*|_beta\d*|_pre\d*|_rc\d*|_p\d*)*'  # Gentoo suffixes
-                r'(-r\d+)?'  # Optional revision
-                r'$'
-            )
-            if not gentoo_version_re.match(version):
-                logger.debug(f"Invalid Gentoo version format: {version} (from {pypi_version})")
+            if version is not None and not pms_version.is_valid(version):
+                logger.debug(
+                    f"Invalid Gentoo version format: {version} (from {pypi_version})"
+                )
                 return None
+            return version
 
+        version = pypi_version_mod.translate_pep440(pypi_version)
+        if version is None:
+            logger.debug(f"No valid Gentoo version for {pypi_version}")
         return version
-            
+
     def _get_package_versions(self, pypi_name: str) -> List[str]:
         """Get available Gentoo versions for a PyPI package."""
         # Check if we have cached versions for this package

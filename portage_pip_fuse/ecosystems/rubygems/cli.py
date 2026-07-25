@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 
+from portage_pip_fuse import pms_version
 from portage_pip_fuse.ecosystems.rubygems.name_translator import (
     create_rubygems_translator
 )
@@ -42,7 +43,7 @@ def gem_to_gentoo(gem_name: str) -> str:
     return _get_translator().rubygems_to_gentoo(gem_name)
 
 
-def _translate_gem_version(gem_version: str) -> str:
+def _translate_gem_version(gem_version: str) -> Optional[str]:
     """
     Translate gem version string to Gentoo format.
 
@@ -51,16 +52,24 @@ def _translate_gem_version(gem_version: str) -> str:
     - .beta -> _beta
     - .pre -> _pre
     - .rc -> _rc
+
+    Args:
+        gem_version: RubyGems version string
+
+    Returns:
+        Gentoo version string, or None if the version cannot be represented in
+        PMS form. Callers fall back to an unversioned atom rather than emitting
+        one portage cannot parse.
+
+    Examples:
+        >>> _translate_gem_version('1.0.0')
+        '1.0.0'
+        >>> _translate_gem_version('2.0.0.beta1')
+        '2.0.0_beta1'
+        >>> _translate_gem_version('1.0.0.RELEASE') is None
+        True
     """
-    version = gem_version
-
-    # Replace pre-release markers
-    version = re.sub(r'\.alpha(\d*)', r'_alpha\1', version)
-    version = re.sub(r'\.beta(\d*)', r'_beta\1', version)
-    version = re.sub(r'\.pre(\d*)', r'_pre\1', version)
-    version = re.sub(r'\.rc(\d*)', r'_rc\1', version)
-
-    return version
+    return pms_version.translate_dotted(gem_version)
 
 
 def _format_gentoo_atom(gem_name: str, version_constraint: Optional[str] = None) -> str:
@@ -93,6 +102,8 @@ def _format_gentoo_atom(gem_name: str, version_constraint: Optional[str] = None)
 
         op, version = match.groups()
         gentoo_version = _translate_gem_version(version)
+        if gentoo_version is None:
+            continue
 
         if op == '~>':
             # Pessimistic constraint
@@ -191,8 +202,8 @@ def _generate_virtual_ebuild(
         seen_gems.add(gem.name)
 
         gentoo_name = gem_to_gentoo(gem.name)
-        if gem.version:
-            version = _translate_gem_version(gem.version)
+        version = _translate_gem_version(gem.version) if gem.version else None
+        if version is not None:
             # Use ~ to match revision bumps (e.g., 1.0.0-r1)
             rdepend_lines.append(f"\t~dev-ruby/{gentoo_name}-{version}")
         else:
@@ -327,13 +338,16 @@ Examples:
         if gem == 'install':
             continue
 
-        if args.version:
-            version = _translate_gem_version(args.version)
-            gentoo_name = gem_to_gentoo(gem)
+        gentoo_name = gem_to_gentoo(gem)
+        version = _translate_gem_version(args.version) if args.version else None
+        if version is not None:
             # Use ~ to match revision bumps (e.g., 1.0.0-r1)
             emerge_cmd.append(f"~dev-ruby/{gentoo_name}-{version}")
         else:
-            gentoo_name = gem_to_gentoo(gem)
+            if args.version:
+                print(f"Warning: version {args.version!r} has no Gentoo "
+                      f"equivalent; requesting {gentoo_name} unversioned",
+                      file=sys.stderr)
             emerge_cmd.append(f"dev-ruby/{gentoo_name}")
 
     # Show or execute
@@ -523,8 +537,8 @@ Examples:
         seen_gems.add(gem.name)
 
         gentoo_name = gem_to_gentoo(gem.name)
-        if gem.version:
-            version = _translate_gem_version(gem.version)
+        version = _translate_gem_version(gem.version) if gem.version else None
+        if version is not None:
             # Use ~ to match revision bumps (e.g., 1.0.0-r1)
             set_lines.append(f"~dev-ruby/{gentoo_name}-{version}")
         else:

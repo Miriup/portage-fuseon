@@ -13,6 +13,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Set
 
+from portage_pip_fuse import pms_version
+
 logger = logging.getLogger(__name__)
 
 
@@ -486,11 +488,10 @@ class GentooVersionFilter:
     - Invalid suffix combinations that can't be translated
     """
 
-    # Standard Gentoo pre-release suffix names
-    STANDARD_SUFFIXES = {'alpha', 'beta', 'pre', 'rc', 'p'}
-
-    # Ruby shorthand -> Gentoo suffix (e.g., 5.a -> 5_alpha)
-    SHORTHAND_MAP = {'a': 'alpha', 'b': 'beta'}
+    # Retained for backwards compatibility; the translation rules now live in
+    # portage_pip_fuse.pms_version, which this filter delegates to.
+    STANDARD_SUFFIXES = frozenset(pms_version.PMS_SUFFIXES)
+    SHORTHAND_MAP = dict(pms_version.DEFAULT_SHORTHAND_MAP)
 
     @classmethod
     def get_filter_name(cls) -> str:
@@ -573,57 +574,14 @@ class GentooVersionFilter:
             False
             >>> f._can_translate_version('1.0.0.RELEASE')
             False
+
+            A literal dotted ``.p`` component is not translatable, because a
+            bare numeric component already encodes a patchlevel:
+
+            >>> f._can_translate_version('1.0.0.p1')
+            False
         """
-        # Split into base version (numbers.numbers...) and suffix
-        match = re.match(r'^(\d+(?:\.\d+)*)(.*)$', gem_version)
-        if not match:
-            return False
-
-        base, suffix = match.groups()
-
-        if not suffix:
-            return True  # Pure numeric version is always valid
-
-        # Parse suffix components
-        suffix = suffix.lstrip('.')
-        if not suffix:
-            return True
-
-        components = suffix.split('.')
-
-        i = 0
-        while i < len(components):
-            comp = components[i].lower()
-
-            # Check for Ruby shorthand (a, b)
-            if comp in self.SHORTHAND_MAP:
-                i += 1
-            elif comp in self.STANDARD_SUFFIXES:
-                # Standard suffix - check if next component is a number
-                if i + 1 < len(components) and components[i + 1].isdigit():
-                    i += 2
-                else:
-                    i += 1
-            elif comp.isdigit():
-                # Standalone number - valid as patchlevel
-                i += 1
-            elif re.match(r'^([ab])(\d+)$', comp):
-                # Shorthand with number (a1 -> alpha1, b2 -> beta2)
-                i += 1
-            elif re.match(r'^([a-z]+)(\d+)$', comp):
-                # Combined suffix like 'alpha1', 'beta2'
-                m = re.match(r'^([a-z]+)(\d+)$', comp)
-                name = m.group(1)
-                if name in self.STANDARD_SUFFIXES:
-                    i += 1
-                else:
-                    # Non-standard suffix like 'racecar1'
-                    return False
-            else:
-                # Non-standard suffix
-                return False
-
-        return True
+        return pms_version.can_translate_dotted(gem_version)
 
 
 # Register built-in filters
